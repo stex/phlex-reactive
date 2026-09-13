@@ -6,6 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
 ### Added
 
 - **`bin/release` — the release front door, ported from pgbus.** Works out the
@@ -17,16 +18,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the push or ships whatever local commits happen to be sitting there — and
   refuses an existing tag unless `--force` (which maps to `release[X.Y.Z,force]`).
   It also warns when `version.rb` and the newest `v*` tag disagree.
-
-### Fixed
-
-- **`rake release` re-locks the root `Gemfile.lock` too.** Since #246 the gem
-  root's lockfile is committed, and it pins `phlex-reactive` by local path — so
-  the version bump left it stale and the Release workflow's frozen
-  `bundle install` refused it (v0.13.0's first attempt). The release task now
-  re-locks and commits every tracked lockfile that pins the gem (root + docs).
-
-### Added
 
 - **Async-action lifecycle: `reply.pending` + `reactive_settle` (#248).** An
   action that *enqueues* work can now reply truthfully. The endpoint renders the
@@ -449,6 +440,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     to settle.
 
 ### Fixed
+
+- **`rake release` bumps the pin in every tracked lockfile (#247, #253).** Since
+  #246 the gem root's `Gemfile.lock` is committed alongside `docs/Gemfile.lock`,
+  and both pin `phlex-reactive` by local path — so a version bump that left them
+  alone shipped a stale lockfile, and the Release workflow's frozen
+  `bundle install` refused it (v0.13.0's first attempt).
+
+  The task now bumps that pin **with a text edit**, not `bundle lock`. #247's
+  first cut used `bundle lock --local`, which is a full re-resolve — and a
+  re-resolve trips over constraints that have nothing to do with this gem:
+  `docs/Gemfile.lock` declares Linux platforms for the Kamal deploy, and
+  resolving `thruster` for those against a Mac's installed gems fails ("Could
+  not find gems matching 'thruster' valid for all resolution platforms"), which
+  aborted v0.13.1's first attempt mid-release with `version.rb` already bumped.
+  A re-resolve also silently folds unrelated dependency drift into the release
+  commit the moment a Gemfile is out of sync with its lock. The only line a
+  version bump changes is the path-gem pin, so the task edits exactly that (the
+  `PATH` spec + the `CHECKSUMS` entry) in place — deterministic on any machine,
+  no network, no installed gems, the same 2-line diff bundler produced. A
+  lockfile that names no pin at all now **aborts** the release rather than
+  reporting itself already current — and that check runs in a PREFLIGHT, before
+  the task does anything destructive or irreversible: before the `force`
+  cleanup that deletes the GitHub release and its tag, and before `version.rb`
+  or any lockfile is written. So an abort leaves the release intact and the tree
+  clean, rather than a deleted release or a half-bumped tree the clean-tree
+  guard would then block on retry.
+  pgbus's release task made the same call after the same failure.
 
 - **`Component::Action` renamed `ActionDefinition` — it shadowed a host kit
   component named `Action` under dev autoloading (#233).** The mixin sits in

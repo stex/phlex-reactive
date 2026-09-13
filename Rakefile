@@ -225,7 +225,43 @@ task :release, %i[version force] do |_t, args|
   info "New version:     #{new_version}"
   info "Pre-release:     #{prerelease}"
 
-  # Step 0: Force cleanup — delete existing release and tag
+  # Step 0a: PREFLIGHT the lockfiles — read and validate every one BEFORE the
+  # task does ANYTHING destructive or irreversible. It must precede BOTH:
+  #
+  #   * the force cleanup below, which DELETES the GitHub release and its tag
+  #     (aborting after that has thrown away release notes and assets for a
+  #     problem we could have seen first), and
+  #   * Step 1/1b's writes — aborting after version.rb is bumped, or after the
+  #     first lockfile is rewritten, leaves a DIRTY tree that the clean-tree
+  #     guard above then blocks on the next run: a half-done release that
+  #     cannot be retried without manual cleanup. That is exactly the state
+  #     v0.13.1's first attempt left behind.
+  #
+  # It only READS files, so there is no cost to running it first — and every
+  # reason to.
+  #
+  # Zero matches is not "already current": it means the file does not pin the
+  # gem the way we think it does (a renamed gem, a changed lockfile format, a
+  # file that never belonged in the list). Proceeding would ship version.rb
+  # bumped against a lockfile still naming the old version — the stale-lockfile
+  # release #247 exists to prevent, only silent.
+  #
+  # Matches the PATH-source spec ("    phlex-reactive (X.Y.Z)") and the
+  # CHECKSUMS pin ("  phlex-reactive (X.Y.Z)"), leaving everything else
+  # untouched. The DEPENDENCIES entry is the version-less "phlex-reactive!",
+  # which carries no version and so is deliberately not matched.
+  pin_pattern = /^(\s+phlex-reactive) \(([^)]*)\)$/
+  lockfiles = %w[Gemfile.lock docs/Gemfile.lock].select { File.exist?(it) }
+  locks = lockfiles.to_h { [it, File.read(it)] }
+  locks.each do |lockfile, content|
+    next unless content.scan(pin_pattern).empty?
+
+    abort "\e[31mAborting: #{lockfile} contains no `phlex-reactive (X.Y.Z)` pin to bump.\e[0m\n" \
+          "Either the lockfile format changed or this file does not pin the gem — fix it (or drop " \
+          "it from the list in the release task) before releasing. Nothing has been modified."
+  end
+
+  # Step 0b: Force cleanup — delete existing release and tag
   if force
     header "Force cleanup"
     if system("gh release view #{tag} >/dev/null 2>&1")
@@ -254,26 +290,46 @@ task :release, %i[version force] do |_t, args|
     success "Updated #{version_file}"
   end
 
-  # Step 1b: Re-lock every tracked Gemfile.lock that pins this gem via a local
-  # path — the root one (`gemspec` in ./Gemfile, committed since #246) and the
-  # docs site's (`path: ".."`). Both carry the version string, so bumping
-  # version.rb without re-locking leaves a committed lockfile stale: the Release
-  # workflow's frozen `bundle install` then refuses it ("gemspecs for path gems
-  # changed, but the lockfile can't be updated because frozen mode is set") and
-  # every fresh `bundle install` dirties the tree. `bundle lock --local`
-  # re-derives only from the path dep — no network, no rubygems fetch, no
-  # checksum to compute for a path gem — so it works in the release environment.
-  # Committed alongside the bump in Step 3. Any OTHER tracked lockfile pinning
-  # the gem belongs in this list.
-  lockfiles = { "Gemfile.lock" => "Gemfile", "docs/Gemfile.lock" => "docs/Gemfile" }.select { File.exist?(_1) }
+  # Step 1b: Bump the pin in every tracked Gemfile.lock that carries this gem
+  # via a local path — the root one (`gemspec` in ./Gemfile, committed since
+  # #246) and the docs site's (`path: ".."`). Both carry the version string, so
+  # bumping version.rb without them leaves a committed lockfile stale: the
+  # Release workflow's frozen `bundle install` then refuses it ("gemspecs for
+  # path gems changed, but the lockfile can't be updated because frozen mode is
+  # set") and every fresh `bundle install` dirties the tree.
+  #
+  # The ONLY thing a version bump changes in these lockfiles is the path-gem
+  # pin — so bump exactly that line, in place, with a string edit. We
+  # deliberately do NOT run `bundle lock` (with or without --local): it is a
+  # full re-resolve, and a re-resolve trips over constraints that have nothing
+  # to do with this gem. Concretely, docs/Gemfile.lock declares Linux
+  # PLATFORMS for the Kamal deploy, and `bundle lock --local` refuses to
+  # resolve a platform gem like `thruster` for those against a Mac's installed
+  # gems ("Could not find gems matching 'thruster' valid for all resolution
+  # platforms") — which aborted v0.13.1's first attempt, mid-release, with
+  # version.rb already bumped. It also re-resolves the WHOLE lock the moment a
+  # Gemfile drifted from its lock, silently folding an unrelated dependency
+  # jump into the release commit (pgbus was already stale-locked in docs/
+  # exactly this way). pgbus's release task hit the same thruster failure and
+  # made the same call. A targeted pin edit is deterministic on any machine,
+  # needs no network and no installed gems, and yields the minimal diff: the
+  # PATH spec line plus the CHECKSUMS line. Committed alongside the bump in
+  # Step 3. Any OTHER tracked lockfile pinning the gem belongs in this list.
   header "Lockfiles"
-  lockfiles.each do |lock, gemfile|
-    # BUNDLE_GEMFILE instead of Dir.chdir — no process-wide cwd change; bundle
-    # writes the lockfile in place next to the pointed-at Gemfile.
-    sh({ "BUNDLE_GEMFILE" => gemfile }, "bundle lock --local")
-    success "Re-locked #{lock} to #{new_version}"
+  locks.each do |lockfile, content|
+    pins = content.scan(pin_pattern)
+    if pins.all? { |_prefix, version| version == new_version }
+      # A genuine re-run after a partial failure: the pins ARE there and already
+      # current. Distinguishable from the zero-pin case (which aborted in the
+      # preflight) only because we counted rather than comparing strings.
+      skip "#{lockfile} — #{pins.size} pin(s) already #{new_version}"
+      next
+    end
+
+    File.write(lockfile, content.gsub(pin_pattern, "\\1 (#{new_version})"))
+    success "Bumped #{pins.size} phlex-reactive pin(s) in #{lockfile}"
   end
-  skip "No tracked lockfiles" if lockfiles.empty?
+  skip "No tracked lockfiles" if locks.empty?
 
   # Step 2: Verify gem builds cleanly
   header "Build verification"
@@ -286,7 +342,7 @@ task :release, %i[version force] do |_t, args|
   # when EITHER the version file OR any lockfile changed (a re-run where only a
   # lockfile drifted — like v0.13.0's first attempt — still commits).
   header "Git commit"
-  release_files = [version_file, *lockfiles.keys]
+  release_files = [version_file, *lockfiles]
   changed = release_files.any? do |f|
     !`git diff #{f}`.strip.empty? || !`git diff --cached #{f}`.strip.empty?
   end
