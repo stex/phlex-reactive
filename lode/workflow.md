@@ -120,7 +120,7 @@ Suggestions that are wrong in this repository. Push back on sight.
 | `lib/phlex/reactive/version.rb` | releases land directly on `main`, so an ordinary feature branch never edits this. A conflict means the branch bumped it deliberately (a release-prep PR) — keep the branch's bump. If the intent is not obvious from the branch's own commits, stop and ask |
 | `Gemfile.lock`, `docs/Gemfile.lock` | take the base's file, then `bundle install` in the gem root or in `docs/`. Never hand-edit a lockfile |
 | `bun.lock`, `docs/bun.lock` | take the base's, then `bun install` in that directory |
-| `docs/app/models/doc.rb` | append-only, base order first — each side's page entries must all survive |
+| `docs/app/models/doc.rb`, `spec/dummy/config/routes.rb` and any other route file | append-only registries, base order first — each side's entries must all survive |
 | `spec/fixtures/show_predicate_vectors.json` | union the vectors; both sides' cases are parity proofs |
 | fixtures / dummy components | add a second component rather than merging two shapes into one |
 
