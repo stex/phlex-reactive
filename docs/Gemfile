@@ -29,7 +29,7 @@ gem "phlex-rails"
 
 # Docs UI: daisyUI Phlex components for chrome (sidebar, drawer, tabs, cards).
 # The reactive demo components themselves stay framework-agnostic.
-gem "daisyui", github: "zoolutions/daisyui", require: "daisy_ui"
+gem "daisyui"
 
 # Shared docs-site chrome (Shell/Sidebar/Code/Page/...) — the single place the
 # layout/design lives, shared with the daisyUI docs site. Configured per-site via
