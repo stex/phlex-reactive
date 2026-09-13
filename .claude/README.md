@@ -5,7 +5,7 @@ the whole team (and every autonomous session) shares the same conventions.
 
 ```
 .claude/
-├── commands/   Slash commands (/lfg, /tdd, /plan, /security, …) — one markdown file each
+├── commands/   Local slash commands (/architect, /security, /review-pr, /perf) — one markdown file each; the workflow commands are /lode:* from the plugin
 ├── rules/      Standing rules auto-loaded into context (coding-style, testing, performance, git-workflow, agents)
 ├── README.md   This file — how to author a command
 └── SKILL_TEMPLATE.md   Copy-paste starting point for a new command
