@@ -4085,7 +4085,7 @@ export default class extends Controller {
     // instead — and its hidden twin is suppressed as a companion, so the value
     // still rides the wire exactly once.
     this.element
-      .querySelectorAll("[name]:is(lexxy-editor, trix-editor, [contenteditable=''], [contenteditable=true], [contenteditable=plaintext-only])")
+      .querySelectorAll(`[name]${PERSIST_EDITOR_SELECTOR}`)
       .forEach((el) => {
         if (!owns(el)) return // reuse the SAME hoisted predicate (nested reactive root — issue #15)
         // A plain element (e.g. a <div contenteditable>) has no `name` IDL
