@@ -386,28 +386,21 @@ test("an editor CONTRIBUTES to a group instead of standing down behind it", asyn
   expect(await collect(root)).toEqual({ "notes[]": ["a", "typed"] })
 })
 
-test("a hidden twin of a named editor contributes nothing under a [] name", () => {
-  // An editor that mirrors its serialized value into a same-named hidden is the
-  // shape the second pass exists for. Under a `[]` name both would otherwise
-  // push and the value would ride the wire TWICE, while the draft — which never
-  // sees hidden inputs — holds one. The hidden is that editor's companion, the
-  // same rule Rails' unchecked_value default gets.
+
+test("a hidden under a group's name contributes even when an editor shares it", () => {
+  // Nothing here can tell a hidden that MIRRORS an editor from one that is a
+  // list JS maintains: both are `<input type="hidden">` under the same name.
+  // Suppressing it would be the quieter failure — a doubled value shows up on
+  // the wire, a swallowed one does not — so the hidden keeps its say. Measured
+  // while a rule suppressed it: `{"pick[]": ["a","typed"]}`, with the hidden's
+  // own "h" gone.
   const root = new FakeNode({ tag: "div", controller: "reactive" })
   root.append(
-    hidden("notes[]", "<p>x</p>"),
-    new FakeNode({ tag: "trix-editor", name: "notes[]", editor: true, value: "<p>x</p>" }),
+    hidden("tag_ids[]", "h"),
+    new FakeNode({ tag: "div", name: "tag_ids[]", editor: true, value: null, textContent: "typed" }),
   )
 
-  return expect(collect(root)).resolves.toEqual({ "notes[]": ["<p>x</p>"] })
-})
-
-test("a hidden WITHOUT a same-named editor still contributes under a [] name", () => {
-  // The counterweight: a list JS maintains as hidden inputs is an ordinary
-  // shape, and those values are chosen values.
-  const root = new FakeNode({ tag: "div", controller: "reactive" })
-  root.append(hidden("tag_ids[]", "7"), hidden("tag_ids[]", "9"))
-
-  return expect(collect(root)).resolves.toEqual({ "tag_ids[]": ["7", "9"] })
+  return expect(collect(root)).resolves.toEqual({ "tag_ids[]": ["h", "typed"] })
 })
 
 test("a []-named radio keeps its chosen value when an editor shares the name", () => {
@@ -424,13 +417,12 @@ test("a []-named radio keeps its chosen value when an editor shares the name", (
   return expect(collect(root)).resolves.toEqual({ "pick[]": "a" })
 })
 
-test("an unupgraded rich editor does not empty its hidden twin's group", () => {
+test("an unupgraded rich editor contributes nothing to its group", () => {
   // Trix defines its elements in a setTimeout after load, so a save can run
   // while the editor is still a plain unupgraded tag with nothing to read.
-  // Its hidden twin carries the real value then — suppressing the hidden as a
-  // companion and pushing the editor's "" would post an empty group over it,
-  // which is issue #8 under a `[]` name. Measured before this guard:
-  // {"notes[]": [""]}.
+  // Its "" is an ABSENT value, not an empty one, and pushing it would add a
+  // phantom entry beside whatever else the group carries. persistSnapshot
+  // omits such an editor for the same reason.
   const root = new FakeNode({ tag: "div", controller: "reactive" })
   root.append(
     hidden("notes[]", "<p>real</p>"),

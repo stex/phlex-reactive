@@ -4043,8 +4043,13 @@ export default class extends Controller {
         controls.push(field)
       }
     })
+    // Collected before the first pass so the editor DOM is walked once.
+    const editors = []
+    this.element.querySelectorAll(`[name]${PERSIST_EDITOR_SELECTOR}`).forEach((el) => {
+      if (owns(el)) editors.push(el) // the SAME hoisted predicate (nested reactive root, issue #15)
+    })
     const arrayNames = this.#arrayFieldNames(controls)
-    const companionNames = this.#companionNames(controls, this.#editorNames(owns))
+    const companionNames = this.#companionNames(controls)
     for (const field of controls) {
       if (arrayNames.has(field.name)) {
         const slot = fields[field.name] ?? (fields[field.name] = [])
@@ -4084,25 +4089,27 @@ export default class extends Controller {
     // when populated. Under a `[]` name the editor APPENDS to the group slot
     // instead — and its hidden twin is suppressed as a companion, so the value
     // still rides the wire exactly once.
-    this.element
-      .querySelectorAll(`[name]${PERSIST_EDITOR_SELECTOR}`)
+    editors
       .forEach((el) => {
-        if (!owns(el)) return // reuse the SAME hoisted predicate (nested reactive root — issue #15)
         // A plain element (e.g. a <div contenteditable>) has no `name` IDL
         // property — only the attribute — so read getAttribute, not el.name.
         const name = el.getAttribute("name")
         if (!name) return
         const own = el.value ?? el.textContent ?? el.innerHTML ?? ""
-        // A `[]` name is a group here too, companion rule included: the
-        // editor APPENDS its value instead of replacing the slot. Assigning a
-        // scalar would have posted `{"notes[]": "<p>x</p>"}` while the draft
-        // snapshot pushed the same control into an array — the wire and the
-        // draft disagreeing about one field, and a declared array type seeing
-        // a string.
+        // A `[]` name is a group here too: the editor APPENDS its value
+        // instead of replacing the slot. Assigning a scalar posted
+        // `{"notes[]": "<p>x</p>"}` while the draft snapshot pushed the same
+        // control into an array — the wire and the draft disagreeing about one
+        // field, and a declared array type seeing a string. A same-named hidden
+        // is NOT read as this editor's twin: nothing here can tell a mirror
+        // from a list JS maintains, and a value posted twice is visible while a
+        // suppressed one is not.
         const existing = fields[name]
-        // An editor that has not upgraded yet contributes NOTHING to a group:
-        // its "" would ride the wire as a phantom entry beside the real value
-        // its hidden twin carries.
+        // An editor that has not upgraded yet contributes NOTHING to a group.
+        // Trix defines its elements in a setTimeout after load, and its "" is
+        // not an empty value but an absent one: persistSnapshot omits such an
+        // editor for the same reason, so this keeps the wire and the draft
+        // saying the same thing.
         if (String(name).endsWith("[]") && !collectorEditorReady(el)) return
         if (String(name).endsWith("[]") && (existing === undefined || Array.isArray(existing))) {
           const slot = Array.isArray(existing) ? existing : (fields[name] = [])
@@ -4161,31 +4168,9 @@ export default class extends Controller {
   // the test. What identifies a companion is that a checkbox shares its name.
   // A hidden WITHOUT a same-named checkbox is a list JS maintains, and its
   // value is a chosen value like any other.
-  #companionNames(controls, editorNames) {
-    const names = new Set(editorNames)
-    for (const field of controls) if (field.type === "checkbox") names.add(field.name)
-    return names
-  }
-
-  // The names carried by NAMED editors, read from the same query the second
-  // pass uses. A hidden input sharing a name with one is that editor's twin —
-  // an editor that mirrors its serialized value into a hidden is the shape the
-  // second pass was written for — so under a `[]` name the hidden contributes
-  // nothing and the editor speaks for both. Without this the value would ride
-  // the wire TWICE while the draft, which never sees hidden inputs, holds one.
-  // The canonical Rails Trix pair is unaffected: there the NAME sits on the
-  // hidden and the editor points at it with `input=`, so it has no name here.
-  #editorNames(owns) {
+  #companionNames(controls) {
     const names = new Set()
-    this.element.querySelectorAll(`[name]${PERSIST_EDITOR_SELECTOR}`).forEach((el) => {
-      if (!owns(el)) return
-      // Only a READY editor speaks for its hidden twin. Before the upgrade the
-      // editor has nothing to say, and suppressing the hidden would post an
-      // empty group where the real value was — issue #8 under a `[]` name.
-      if (!collectorEditorReady(el)) return
-      const name = el.getAttribute("name")
-      if (name) names.add(name)
-    })
+    for (const field of controls) if (field.type === "checkbox") names.add(field.name)
     return names
   }
 

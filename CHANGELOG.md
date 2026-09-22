@@ -457,17 +457,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   contributes to an array, including a single one and including a named rich
   editor or bare contenteditable, which the collector reads in a second pass: a
   lone `<input type="text" name="tags[]">` used to post `"abc"` and now posts
-  `["abc"]`. An editor sharing its `[]` name with another control now ADDS its
-  value to the group rather than standing down behind it, so the entry count
-  changes there too — except beside a RADIO, whose single value the editor
-  leaves alone — a ready but empty editor contributes an empty string, the way
-  an empty text field in the same group does, while an unticked box still
-  contributes nothing and a hidden input that merely mirrors a named editor is
-  that editor's companion and contributes nothing either. Against a flat
-  `params: { tags: :string }` the array coerces to the literal `"[\"abc\"]"` —
-  silently, with a 200. A control whose name ends in `[]` has to be declared as
-  an array type (`tags: [:string]`), or renamed without the suffix if it was
-  never meant as a list.
+  `["abc"]`. An editor sharing its `[]` name with another control adds its
+  value to the group instead of standing down behind it, so the entry count
+  changes there too. Beside a radio it still stands down, because a radio keeps
+  its single value with or without the suffix. A ready but empty editor
+  contributes an empty string, the way an empty text field in the same group
+  does. An unticked box still contributes nothing. A hidden input under the
+  same name keeps contributing: nothing in the DOM tells a hidden that mirrors
+  an editor from one that is a list JS maintains, and a value posted twice is
+  visible where a swallowed one is not. Against a flat `params: { tags: :string
+  }` the array coerces to the literal `"[\"abc\"]"` — silently, with a 200. A
+  control whose name ends in `[]` has to be declared as an array type (`tags:
+  [:string]`), or renamed without the suffix if it was never meant as a list.
 
   Three shapes keep their meaning on purpose: a lone checkbox without `[]` stays
   the documented yes/no boolean, a radio group keeps its single checked value
