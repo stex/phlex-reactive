@@ -124,6 +124,31 @@ module Views
               not the conceptual params. A flat `{ date: :string }` against
               `invoice[date]` inputs matches nothing and the value is silently
               dropped.
+
+              **Checkbox groups.** Controls sharing a name that ends in `[]` are
+              collected as an **array of the chosen values**: a ticked box
+              contributes its `value`, an unticked one nothing, a `<select
+              multiple>` its selected options. Declare it as an array type.
+
+              ```ruby
+              action :save, params: { features: [:string] }
+              # <input type="checkbox" name="features[]" value="news">
+              ```
+
+              Nothing ticked is an **empty array**, not a missing key, so an action
+              can tell a cleared group from one that never rendered. A form body
+              cannot carry an empty array at all — and the client sends one as
+              soon as a file input holds a file — so a cleared group is absent
+              there and the keyword default applies. See the multipart caveat in
+              the README.
+
+              Three shapes keep their own meaning: a lone checkbox without `[]`
+              stays the yes/no boolean, a radio group keeps its single checked
+              value with or without `[]`, and a hidden input sharing a name with a
+              checkbox is that box's **companion** — Rails' `check_box` emits one
+              carrying the `unchecked_value`, `"0"` by default — and contributes
+              nothing. A hidden input *without* a same-named checkbox is an
+              ordinary value, the usual shape for a list JS maintains.
             MD
 
             DocsUI::Callout(:tip, title: 'Files & multipart') do

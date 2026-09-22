@@ -710,3 +710,314 @@ test("without debug a throwing editor setter is silent", () => {
   expect(() => controller.connect()).not.toThrow()
   expect(infos).toEqual([])
 })
+
+// --- checkbox groups (issue #258) -----------------------------------------
+
+const GROUP = `
+  <input type="checkbox" name="features[]" value="news">
+  <input type="checkbox" name="features[]" value="events">
+  <input type="checkbox" name="features[]" value="maps">
+`
+
+test("a group drafts the TICKED VALUES, not one box's checked state", () => {
+  const { controller, el } = mount(GROUP)
+  controller.connect()
+  el.querySelector('[value="news"]').checked = true
+  el.querySelector('[value="maps"]').checked = true
+  fire(el.querySelector('[value="maps"]'), "change")
+  drainTimers()
+
+  const draft = storage.json(KEY).fields
+  expect(draft["features[]"]).toEqual(["news", "maps"])
+})
+
+test("restoring a group ticks exactly the drafted boxes, not all of them", () => {
+  // The bug this guards: with one boolean in the draft, the restore applied it
+  // to every box of the group — a draft of "the last box was ticked" came back
+  // as "everything is ticked".
+  seedDraft({ "features[]": ["events"] })
+  const { controller, el } = mount(GROUP)
+  controller.connect()
+
+  expect(el.querySelector('[value="news"]').checked).toBe(false)
+  expect(el.querySelector('[value="events"]').checked).toBe(true)
+  expect(el.querySelector('[value="maps"]').checked).toBe(false)
+})
+
+test("restoring a group with SEVERAL drafted values ticks all of them", () => {
+  // The single-value case above cannot see this: the restore decides "did the
+  // server have a say?" per box, and the loop writes `checked` as it goes — so
+  // asking from inside it reads this restore's own work, and every box after
+  // the first looks server-rendered. Measured before the fix: a draft of
+  // ["news","maps"] came back as ["news"] alone.
+  seedDraft({ "features[]": ["news", "maps"] })
+  const { controller, el } = mount(GROUP)
+  controller.connect()
+
+  expect([...el.querySelectorAll("input")].filter((b) => b.checked).map((b) => b.value)).toEqual(["news", "maps"])
+})
+
+test("a group the server rendered ticked still beats the draft", () => {
+  // The counterweight: the guard must keep working, and it reads the state the
+  // SERVER left, not the one the restore is writing.
+  seedDraft({ "features[]": ["news", "maps"] })
+  const { controller, el } = mount(`
+    <input type="checkbox" name="features[]" value="news">
+    <input type="checkbox" name="features[]" value="events" checked>
+    <input type="checkbox" name="features[]" value="maps">
+  `)
+  controller.connect()
+
+  expect([...el.querySelectorAll("input")].filter((b) => b.checked).map((b) => b.value)).toEqual(["events"])
+})
+
+test("a lone checkbox keeps drafting its boolean", () => {
+  const { controller, el } = mount(`<input type="checkbox" name="gift">`)
+  controller.connect()
+  el.querySelector('[name="gift"]').checked = true
+  fire(el.querySelector('[name="gift"]'), "change")
+  drainTimers()
+
+  expect(storage.json(KEY).fields.gift).toBe(true)
+})
+
+test("an editor sharing a group's name appends instead of clobbering the array", () => {
+  // Editors are collected after the native controls, so before the fix the
+  // editor's string replaced the group's array — and the next box's push threw
+  // inside the swallowed draft write, leaving the root with no draft at all.
+  const { controller, el } = mount(`
+    <input type="checkbox" name="notes[]" value="a">
+    <div contenteditable="true" name="notes[]">typed</div>
+  `)
+  controller.connect()
+  el.querySelector('[value="a"]').checked = true
+  fire(el.querySelector('[value="a"]'), "change")
+  drainTimers()
+
+  expect(storage.json(KEY).fields["notes[]"]).toEqual(["a", "typed"])
+})
+
+test("a radio group keeps its single value even under a [] name", () => {
+  const { controller, el } = mount(`
+    <input type="radio" name="plan[]" value="free">
+    <input type="radio" name="plan[]" value="pro">
+  `)
+  controller.connect()
+  el.querySelector('[value="pro"]').checked = true
+  fire(el.querySelector('[value="pro"]'), "change")
+  drainTimers()
+
+  expect(storage.json(KEY).fields["plan[]"]).toBe("pro")
+})
+
+test("a text control sharing the group's name does not kill the draft silently", () => {
+  // The bug this guards is invisible by construction: `.push` on the string a
+  // non-checkbox left in the slot throws inside the draft write, persistWrite
+  // swallows it, and the root then persists NOTHING — no draft, no console
+  // output, nothing to notice. Measured before the fix: storage empty.
+  const { controller, el } = mount(`
+    <input type="text" name="features[]" value="freeform">
+    <input type="checkbox" name="features[]" value="news">
+  `)
+  controller.connect()
+  el.querySelector('[value="news"]').checked = true
+  fire(el.querySelector('[value="news"]'), "change")
+  drainTimers()
+
+  expect(storage.json(KEY)).not.toBeNull()
+  expect(storage.json(KEY).fields["features[]"]).toEqual(["freeform", "news"])
+})
+
+test("a lone control under a [] name keeps its draft round-tripping", () => {
+  // A name ending in `[]` with no second contributor is a list JS maintains,
+  // not a group with an ambiguous mapping: the draft has exactly one entry and
+  // it can only have come from this control. Measured before the group slot
+  // existed, the draft round-tripped; collecting it into an array without this
+  // rule dropped it silently.
+  seedDraft({ "tags[]": ["typed"] })
+  const { controller, el } = mount(`<input type="text" name="tags[]" value="">`)
+  controller.connect()
+
+  expect(el.querySelector("input").value).toBe("typed")
+})
+
+test("a list whose rows shrank between visits keeps what the server rendered", () => {
+  // The DOM decides the group SIZE, the draft decides its LENGTH, and the two
+  // describe different moments: a JS-maintained row list can have three rows
+  // when the draft is written and one when the page comes back. One entry per
+  // control is what makes a group of one unambiguous, so both numbers have to
+  // be one — the size alone would call this resolvable and pick an entry the
+  // field never held.
+  seedDraft({ "tags[]": ["one", "two", "three"] })
+  const { controller, el } = mount(`<input type="text" name="tags[]" value="">`)
+  controller.connect()
+
+  expect(el.querySelector("input").value).toBe("")
+})
+
+test("two generic controls under one [] name keep what the server rendered", () => {
+  // Two contributors and nothing in the draft says which entry was whose, so
+  // the ambiguity stands and both keep the server's value.
+  seedDraft({ "tags[]": ["one", "two"] })
+  const { controller, el } = mount(`
+    <input type="text" name="tags[]" value="">
+    <input type="text" name="tags[]" value="">
+  `)
+  controller.connect()
+
+  expect([...el.querySelectorAll("input")].map((i) => i.value)).toEqual(["", ""])
+})
+
+test("restoring a mixed group leaves the text control alone instead of pasting the list", () => {
+  // The draft of a mixed group is ["freeform", "news"] — the text value and the
+  // ticked box, in document order. Nothing in it says which element belonged to
+  // the text field, so the restore must not guess: it would write
+  // "freeform,news" into the input.
+  seedDraft({ "features[]": ["freeform", "news"] })
+  const { controller, el } = mount(`
+    <input type="text" name="features[]" value="">
+    <input type="checkbox" name="features[]" value="news">
+  `)
+  controller.connect()
+
+  expect(el.querySelector('input[type="text"]').value).toBe("")
+  expect(el.querySelector('[value="news"]').checked).toBe(true)
+})
+
+test("a group with nothing ticked drafts an empty array", () => {
+  const { controller, el } = mount(`
+    <input type="checkbox" name="features[]" value="news">
+    <input type="checkbox" name="features[]" value="events">
+  `)
+  controller.connect()
+  el.querySelector('[value="news"]').checked = true
+  fire(el.querySelector('[value="news"]'), "change")
+  drainTimers()
+  el.querySelector('[value="news"]').checked = false
+  fire(el.querySelector('[value="news"]'), "change")
+  drainTimers()
+
+  expect(storage.json(KEY).fields["features[]"]).toEqual([])
+})
+
+test("restoring a mixed group leaves a contenteditable alone, not 'a,typed'", () => {
+  // The mirror of the snapshot test above. The restore's array guard has to sit
+  // ABOVE the editor branch: below it, the very controls that land last in the
+  // snapshot — editors and contenteditables — would still receive the whole
+  // list stringified.
+  seedDraft({ "notes[]": ["a", "typed"] })
+  const { controller, el } = mount(`
+    <input type="checkbox" name="notes[]" value="a">
+    <div contenteditable="true" name="notes[]"></div>
+  `)
+  controller.connect()
+
+  expect(el.querySelector("[contenteditable]").textContent).toBe("")
+  expect(el.querySelector('[value="a"]').checked).toBe(true)
+})
+
+test("a draft from before the group fix does not tick every box of the group", () => {
+  // The upgrade path: 0.13.2 wrote ONE boolean under `features[]` (the bug),
+  // and the draft outlives the upgrade — default ttl 7 days. Restoring it the
+  // ordinary way hands `true` to every box in the group, which is the very
+  // state this fix exists to remove. A group key that is not a list is stale.
+  storage.seed(KEY, { v: 1, savedAt: now - 1000, fields: { "features[]": true } })
+  const { controller, el } = mount(`
+    <input type="checkbox" name="features[]" value="news">
+    <input type="checkbox" name="features[]" value="events">
+    <input type="checkbox" name="features[]" value="maps">
+  `)
+  controller.connect()
+
+  expect([...el.querySelectorAll("input")].filter((b) => b.checked)).toEqual([])
+})
+
+test("a stale string under a group name leaves the boxes alone too", () => {
+  // The mixed-group shape of the same old draft: the LAST control to write won,
+  // so the key could hold a text value. Boolean("freeform") is true, so without
+  // the guard the box ticks on a value that never belonged to it.
+  storage.seed(KEY, { v: 1, savedAt: now - 1000, fields: { "features[]": "freeform" } })
+  const { controller, el } = mount(`
+    <input type="text" name="features[]" value="">
+    <input type="checkbox" name="features[]" value="news">
+  `)
+  controller.connect()
+
+  expect(el.querySelector('[value="news"]').checked).toBe(false)
+  expect(el.querySelector('input[type="text"]').value).toBe("freeform")
+})
+
+test("a lone checkbox still restores from a boolean draft", () => {
+  // The counterweight: the guard asks for the `[]` suffix, and a checkbox
+  // without one keeps the boolean it has held since #239. Drop the suffix test
+  // and this example goes red.
+  seedDraft({ "form[gift]": true })
+  const { controller, el } = mount(`<input type="checkbox" name="form[gift]">`)
+  controller.connect()
+
+  expect(el.querySelector("input").checked).toBe(true)
+})
+
+test("a late editor under a group name is left alone by the DEFERRED restore too", async () => {
+  // persistDeferEditors calls persistApplyEditor directly after the custom
+  // element upgrades, so the array rule has to be repeated there: the guard
+  // above persistApply's branch chain never sees an editor that was not
+  // upgraded yet at connect time. Without it the editor takes String(array).
+  seedDraft({ "notes[]": ["a", "typed"] })
+  const { controller, q } = mountEditors(
+    `<input type="checkbox" name="notes[]" value="a">
+     <lexxy-editor name="notes[]"></lexxy-editor>`,
+    { late: true },
+  )
+  controller.connect()
+  defineLexxy()
+  await settle()
+
+  expect(q("lexxy-editor").value).toBe("<p><br></p>")
+  expect(editorSets).toBe(0)
+  expect(q('[value="a"]').checked).toBe(true)
+})
+
+test("a stale group key does not wipe a multi-select's server selection under restore: always", () => {
+  // 0.13.2 wrote one value per NAME, last writer wins, so a checkbox in a
+  // mixed group could leave its boolean under the select's name. Under
+  // `restore: "always"` the select branch skips the "the server rendered it"
+  // check, and `wanted` = Set{"true"} matches no option — the rendered
+  // selection would simply disappear.
+  // `note` carries a value of its own in the same draft. Both assertions below
+  // would also hold if the draft never arrived at all — a wrong key, an
+  // expired ttl, a restore that did not run — so the third one is what makes
+  // this a guard rather than a description of an untouched page.
+  storage.seed(KEY, { v: 1, savedAt: now - 1000, fields: { "colors[]": true, note: "drafted" } })
+  const { controller, el } = mount(
+    `<input type="checkbox" name="colors[]" value="red">
+     <select multiple name="colors[]"><option value="blue" selected>blue</option><option value="green">green</option></select>
+     <input type="text" name="note" value="">`,
+    { payload: { key: "apply", ttl: 60, debounce: 300, restore: "always" } },
+  )
+  controller.connect()
+
+  expect([...el.querySelector("select").options].filter((o) => o.selected).map((o) => o.value)).toEqual(["blue"])
+  expect(el.querySelector('input[type="checkbox"]').checked).toBe(false)
+  expect(el.querySelector('[name="note"]').value).toBe("drafted")
+})
+
+test("a late editor does not adopt the single entry a checkbox left in the group", async () => {
+  // The one shape where the group SIZE decides and the entry count cannot: an
+  // editor that has not upgraded yet is omitted from the snapshot, so a group
+  // of two contributors drafts a single entry — the ticked box's value. The
+  // editor must not read it just because the list happens to hold one item.
+  seedDraft({ "notes[]": ["a"] })
+  const { controller, q } = mountEditors(
+    `<input type="checkbox" name="notes[]" value="a">
+     <lexxy-editor name="notes[]"></lexxy-editor>`,
+    { late: true },
+  )
+  controller.connect()
+  defineLexxy()
+  await settle()
+
+  expect(q("lexxy-editor").value).toBe("<p><br></p>")
+  expect(editorSets).toBe(0)
+  expect(q('[value="a"]').checked).toBe(true)
+})

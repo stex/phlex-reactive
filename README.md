@@ -491,12 +491,40 @@ def view_template
 end
 ```
 
-> **One multipart caveat:** `FormData` can't carry an *empty* array or hash, so on
-> the multipart (file-present) path an empty `[]`/`{}` param is **omitted** and the
-> action's keyword default applies — it does **not** arrive as an explicit empty
-> collection the way it does over JSON. If you rely on sending `tags: []` to clear
-> a collection, send that action *without* a file (the JSON path). A non-empty
-> nested/array param rides along fine next to a file.
+> **One multipart caveat:** `FormData` can't carry an *empty* array or hash, and
+> that includes a **checkbox group** (a name ending in `[]`). A group with
+> values rides along fine — every chosen value is written as `params[name][]`,
+> the shape Rack parses back into an array. A group with NOTHING ticked has no
+> form-body spelling at all: its key is absent, and the action's keyword default
+> applies, where the JSON path would have sent `[]`. The same holds for every
+> other empty `[]`/`{}` param on the multipart (file-present) path. If you rely
+> on sending `tags: []` to clear a collection, send that action *without* a file
+> (the JSON path). A non-empty nested/array param rides along fine next to a
+> file.
+
+**Checkbox groups.** Controls sharing a name that ends in `[]` are collected
+as an **array of the chosen values** — a ticked box contributes its `value`, an
+unticked one nothing, a `<select multiple>` its selected options. Nothing ticked is
+an empty array, not a missing key, so an action can tell a cleared group from one
+that never rendered — over the JSON path; a form body cannot carry the empty array,
+see the caveat above. Declare it as an array type:
+
+```ruby
+action :save, params: { features: [:string] }   # <input type="checkbox" name="features[]" value="news">
+```
+
+Three shapes keep their own meaning: a lone checkbox without `[]` stays the
+documented yes/no boolean; a radio group keeps its single checked value, `[]` or
+not; and a hidden input sharing a name with a checkbox is that box's **companion**
+(Rails' `check_box` emits one, carrying the `unchecked_value`) and contributes
+nothing. A hidden input *without* a same-named checkbox is an ordinary value — the
+usual shape for a list maintained by JS.
+
+The suffix is the only trigger, and it applies to a single control too: a lone
+`<input type="text" name="tags[]">` posts `["abc"]` where it used to post
+`"abc"`. Declare such a param as an array type (`tags: [:string]`) — against a
+flat `tags: :string` the array coerces to its literal `to_s`. If the `[]` was
+never meant as a list, drop it from the name.
 
 **Array & nested params.** Wrap a type in an array for an array param, or a hash
 schema in an array for Rails-style nested attributes — so one reactive action can
