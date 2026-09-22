@@ -452,6 +452,10 @@ class DemosController < ActionController::Base
     render_component PartialGridComponent.new(line_item: LineItem.find(params[:id]))
   end
 
+  def checkbox_group
+    render_component CheckboxGroupComponent.new
+  end
+
   def document_upload
     render_component DocumentUploadComponent.new(document: Document.find(params[:id]))
   end
