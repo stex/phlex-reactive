@@ -392,8 +392,8 @@ test("a hidden under a group's name contributes even when an editor shares it", 
   // list JS maintains: both are `<input type="hidden">` under the same name.
   // Suppressing it would be the quieter failure — a doubled value shows up on
   // the wire, a swallowed one does not — so the hidden keeps its say. Measured
-  // while a rule suppressed it: `{"pick[]": ["a","typed"]}`, with the hidden's
-  // own "h" gone.
+  // on THIS fixture with a rule that suppressed the hidden: `["typed"]`, its
+  // own value gone.
   const root = new FakeNode({ tag: "div", controller: "reactive" })
   root.append(
     hidden("tag_ids[]", "h"),

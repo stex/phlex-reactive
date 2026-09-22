@@ -4087,8 +4087,9 @@ export default class extends Controller {
     // Under a plain name: only fill what the standard controls left absent or
     // empty, so a synced hidden input (e.g. Trix mirrors into one) still wins
     // when populated. Under a `[]` name the editor APPENDS to the group slot
-    // instead — and its hidden twin is suppressed as a companion, so the value
-    // still rides the wire exactly once.
+    // instead, and a same-named hidden keeps its own say: nothing here can
+    // tell a hidden that mirrors this editor from one that is a list JS
+    // maintains.
     editors
       .forEach((el) => {
         // A plain element (e.g. a <div contenteditable>) has no `name` IDL
