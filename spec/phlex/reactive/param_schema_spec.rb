@@ -310,4 +310,148 @@ RSpec.describe Phlex::Reactive::ParamSchema do
       expect(coerce({ a: :string }, { "a" => "x", "admin" => "true" }, nil)).to eq(a: "x")
     end
   end
+
+  # Issue #258: a lone blank inside an array param keeps its own meaning per
+  # element type. The client announces a cleared group in `empty_groups[]`
+  # instead of sending `[""]`, precisely so that these four readings stay put —
+  # for a `[:file]` param backing a has_many_attached, "drops the key" and
+  # "explicitly empty" are the difference between leaving the attachments alone
+  # and purging them.
+  describe "a lone blank element (issue #258)" do
+    def coerce(type, value)
+      Phlex::Reactive::ParamSchema.compile({ xs: type }).coerce({ "xs" => value })
+    end
+
+    it "keeps [\"\"] for [:string]" do
+      expect(coerce([:string], [""])).to eq(xs: [""])
+    end
+
+    it "coerces [\"\"] to [0] for [:integer]" do
+      expect(coerce([:integer], [""])).to eq(xs: [0])
+    end
+
+    it "drops the key for [:date], leaving the keyword default" do
+      expect(coerce([:date], [""])).to eq({})
+    end
+
+    it "drops the key for [:file], leaving the keyword default" do
+      expect(coerce([:file], [""])).to eq({})
+    end
+
+    it "passes a real empty array through for every one of them" do
+      [[:string], [:integer], [:date], [:file]].each do
+        expect(coerce(it, [])).to eq(xs: []), "#{it.inspect} lost its empty array"
+      end
+    end
+  end
+
+  # Issue #258: the empty-group announcement may only fill what the action
+  # DECLARED as an array. The walk reads the declaration, so its rules are
+  # measurable here — through the endpoint the layer below absorbs a wrong
+  # answer (a junk key written into the raw params is discarded by coerce), and
+  # a request spec would stay green for both answers.
+  describe "#declares_array? (issue #258)" do
+    def declares?(schema, key)
+      described_class.compile(schema).declares_array?(described_class.bracket_path(key))
+    end
+
+    it "is true for a declared array of scalars" do
+      expect(declares?({ features: [:string] }, "features")).to be(true)
+    end
+
+    it "is false for a declared scalar" do
+      expect(declares?({ subscribe: :boolean }, "subscribe")).to be(false)
+    end
+
+    it "is false for a name the schema never declared" do
+      expect(declares?({ features: [:string] }, "not_a_param")).to be(false)
+    end
+
+    it "reads a STRING-keyed declaration as well as a symbol one" do
+      expect(declares?({ "features" => [:string] }, "features")).to be(true)
+    end
+
+    it "resolves a bracketed name through a nested hash" do
+      expect(declares?({ project: { features: [:string] } }, "project[features]")).to be(true)
+    end
+
+    it "steps over the ROW INDEX of a nested-attributes declaration" do
+      schema = { rows_attributes: [{ id: :integer, features: [:string] }] }
+      expect(declares?(schema, "rows_attributes[0][features]")).to be(true)
+    end
+
+    it "steps over a multi-digit row index" do
+      schema = { rows_attributes: [{ features: [:string] }] }
+      expect(declares?(schema, "rows_attributes[12][features]")).to be(true)
+    end
+
+    it "does NOT step over a segment that is not a row index" do
+      # The bound this walk claims is "only what the action declared", and a
+      # step over an ARBITRARY segment widens it: the leaf resolves against the
+      # element schema under a name no row will ever have, and the endpoint
+      # then writes rows_attributes[whatever][features] into the raw params.
+      # Three segments on purpose — with two, a loosened rule steps past the
+      # end of the path and answers false for the same reason the strict one
+      # does, so the two are indistinguishable there.
+      schema = { rows_attributes: [{ features: [:string] }] }
+      expect(declares?(schema, "rows_attributes[whatever][features]")).to be(false)
+      expect(declares?(schema, "rows_attributes[0][features]")).to be(true)
+    end
+
+    it "resolves a group inside an array of arrays" do
+      # `matrix: [[:string]]` describes its element once too, but the element
+      # IS the group, so the announced name ends in the row index: a client
+      # renders `matrix[0][]` and announces `matrix[0]`. A walk that only steps
+      # OVER an index never reaches an answer here — the index is the last
+      # segment, and the element it names is the array being asked about.
+      expect(declares?({ matrix: [[:string]] }, "matrix[0]")).to be(true)
+    end
+
+    it "is false one level past an array of arrays" do
+      expect(declares?({ matrix: [[:string]] }, "matrix[0][x]")).to be(false)
+    end
+
+    it "is false for an array of scalars addressed by index" do
+      expect(declares?({ ids: [:integer] }, "ids[0]")).to be(false)
+    end
+
+    it "is false for the row itself, which is a hash and not an array param" do
+      schema = { rows_attributes: [{ features: [:string] }] }
+      expect(declares?(schema, "rows_attributes[0]")).to be(false)
+    end
+
+    it "is true for the nested-attributes key itself" do
+      schema = { rows_attributes: [{ features: [:string] }] }
+      expect(declares?(schema, "rows_attributes")).to be(true)
+    end
+
+    it "does not build depth the declaration never had" do
+      expect(declares?({ features: [:string] }, "a[b][c][d]")).to be(false)
+    end
+
+    it "stops at a scalar instead of walking into it" do
+      expect(declares?({ subscribe: :boolean }, "subscribe[features]")).to be(false)
+    end
+
+    it "is false for an empty name" do
+      expect(declares?({ features: [:string] }, "")).to be(false)
+    end
+
+    it "answers for a path whose segments are not strings" do
+      # The endpoint passes what .bracket_path returned, which is Strings, but
+      # the method is public: a symbol key or an Integer row index has to
+      # resolve rather than raise NoMethodError two frames down.
+      schema = { rows_attributes: [{ features: [:string] }] }
+      compiled = described_class.compile(schema)
+
+      expect(compiled.declares_array?(["rows_attributes", 0, :features])).to be(true)
+      expect(compiled.declares_array?(["rows_attributes", nil, "features"])).to be(false)
+      expect(compiled.declares_array?([0])).to be(false)
+      # A schema key that is neither String nor Symbol stays unresolved on
+      # purpose: `compile` accepts it, but `coerce` raises on `0.to_sym` as
+      # soon as that key is present, so resolving it here would turn a request
+      # that answers 200 and fills nothing into a 500.
+      expect(described_class.compile({ 0 => [:string] }).declares_array?([0])).to be(false)
+    end
+  end
 end

@@ -38,6 +38,39 @@ module Phlex
       DROP.freeze
 
       class << self
+        # "invoice[items][0][qty]" => ["invoice", "items", "0", "qty"]; a key
+        # without brackets is a single-element path. Public because the endpoint
+        # resolves the same wire format for `empty_groups[]` (issue #258) and two
+        # parsers for one format drift apart the moment either is extended.
+        def bracket_path(key)
+          key = key.to_s
+          return [key] unless key.include?("[")
+
+          head, rest = key.split("[", 2)
+          [head, *rest.scan(BRACKET_SEGMENT)]
+        end
+
+        # Whether a wire segment names a ROW of a collection rather than a
+        # declared key. Public because the walk and the endpoint both need the
+        # distinction — the walk steps INTO the element a row names, the
+        # endpoint decides whether it may create one — and one definition is
+        # what keeps them from drifting on what counts as a row.
+        #
+        # Deliberately syntactic: the endpoint sees only the announced NAME,
+        # never the declaration, so it cannot ask whether the level above is a
+        # collection. The cost is a declaration that gives a plain hash a
+        # digit-shaped key ({ a: { "0" => { b: [:string] } } }): as a PARENT
+        # segment that key reads as a row, so an announcement for a[0][b] is
+        # refused rather than creating the "0" node — while the same key as the
+        # LEAF of an announced name is written like any other. Fail-closed —
+        # the keyword default stands — and the alternative is for the walk to
+        # report which positions it consumed, which is a lot of machinery for a
+        # schema nobody writes. Refusing and filling are both pinned in
+        # spec/requests/checkbox_group_bounds_spec.rb.
+        def row_index?(segment)
+          segment.to_s.match?(/\A\d+\z/)
+        end
+
         # Validate `schema` recursively against the param-type registry and
         # return a compiled ParamSchema. Raises UnknownParamType at the FIRST
         # unknown type symbol (naming the full bracketed path), so a typo fails
@@ -172,6 +205,52 @@ module Phlex
         # action argument. Nested malformed hashes DO drop (see coerce_hash).
         coerced = coerce_hash(params, @schema, dropped, nil)
         coerced.equal?(DROP) ? {} : coerced
+      end
+
+      # Whether `path` (as ParamSchema.bracket_path splits a wire key) names an
+      # ARRAY param in this DECLARATION. Reads the declared shape, never the
+      # incoming params, so the endpoint's empty-group announcement (issue #258)
+      # can only ever fill something the action asked for. Lives here rather
+      # than in the controller for the #109 reason: a walk over the declaration
+      # is schema logic, and here its rules are reachable from a unit spec.
+      def declares_array?(path)
+        # `path` is a list of segments; the endpoint hands in what
+        # .bracket_path returned, which is Strings. This is public, though, and
+        # a SEGMENT that is a symbol or an Integer row index used to raise
+        # NoMethodError two frames deep — a poor way to say "wrong shape". One
+        # normalisation up front and every segment form resolves the same way.
+        #
+        # A schema key that is neither a String nor a Symbol stays unresolved
+        # on purpose: `compile` accepts `{ 0 => [:string] }`, but `coerce_hash`
+        # raises on `0.to_sym` the moment that key is actually present, so
+        # resolving it here would turn a request that answers 200 and fills
+        # nothing into a 500.
+        path = path.map(&:to_s)
+        node = @schema
+        index = 0
+        while index < path.length
+          if node.is_a?(Array) && ParamSchema.row_index?(path[index])
+            # An ELEMENT schema. A declaration describes its element once —
+            # [{ id: :integer, features: [:string] }] for nested attributes,
+            # [[:string]] for an array of arrays — while the wire carries a row
+            # index per row, so the index has no counterpart to look up: step
+            # INTO the element. Without this an emptied `[]` group inside a row
+            # resolves against the Array, the walk gives up, and the group stays
+            # indistinguishable from one that never rendered.
+            type = node.first
+          else
+            return false unless node.is_a?(Hash)
+
+            # `compile` keeps the keys it was given, so a schema written with
+            # string keys ({"features" => [:string]}) is as valid as a symbol one.
+            type = node.fetch(path[index].to_sym) { node[path[index]] }
+          end
+          return type.is_a?(Array) if index == path.length - 1
+
+          node = type
+          index += 1
+        end
+        false
       end
 
       private
@@ -358,10 +437,7 @@ module Phlex
       # "invoice[items_attributes][0][qty]" => ["invoice", "items_attributes",
       # "0", "qty"]. A key with no brackets is a single-element path.
       def bracket_path(key)
-        return [key] unless key.include?("[")
-
-        head, rest = key.split("[", 2)
-        [head, *rest.scan(BRACKET_SEGMENT)]
+        ParamSchema.bracket_path(key)
       end
 
       # Walk/create nested hashes along `path`, then merge `value` at the leaf so

@@ -555,7 +555,18 @@ module Phlex
       # skipped — zero extra work on the production path.
       def coerce_params(action_def, component_class: nil, action_name: nil)
         dropped = Phlex::Reactive.verbose_errors ? [] : nil
-        raw = unwrap_scope(params.fetch(:params, {}), component_class)
+        raw = params.fetch(:params, {})
+        # BEFORE unwrap_scope, not after: the client announces the raw DOM name,
+        # so a scoped component sends "todo[tags]" and the group has to be placed
+        # at that depth first — peeling the scope afterwards then finds it, the
+        # same way it finds a value the client actually sent. Applied the other
+        # way round, the announcement lands beside the peeled params and the flat
+        # schema never sees it.
+        if params[:empty_groups].present?
+          raw = apply_empty_groups(raw.deep_dup, params[:empty_groups], action_def.schema,
+            component_class)
+        end
+        raw = unwrap_scope(raw, component_class)
 
         coerced = action_def.schema.coerce(raw, dropped)
         log_dropped_params(dropped, action_def.params, component_class, action_name)
@@ -578,6 +589,120 @@ module Phlex
         # coerce): unwrap only when the scope key maps to a nested params/hash.
         nested = raw[scope.to_s]
         nested.is_a?(Hash) || nested.is_a?(ActionController::Parameters) ? nested : raw
+      end
+
+      # Issue #258: a form body cannot carry an empty array, so the client
+      # ANNOUNCES a cleared `[]` group instead — its key is absent from params
+      # and its name rides in `empty_groups[]`, a field of its own beside
+      # token/act/params. Here those names are written back as empty arrays,
+      # which is what the JSON path sends outright, so the same action clears
+      # the same group whichever encoding carried it.
+      #
+      # Why not a blank entry (`params[name][]=""`): `[""]` is ambiguous. Rails
+      # leaves it to the caller — `collection_check_boxes` ships exactly that
+      # marker and the app filters it — and the schema reads it per element
+      # type: `[:string]` keeps `[""]`, `[:integer]` coerces `[0]`, `[:date]`
+      # and `[:file]` drop the key so the keyword default stands. Reading it as
+      # "cleared" would silently change all four.
+      #
+      # Three properties this rule keeps:
+      #   * ADDITIVE — a request without the field behaves exactly as before,
+      #     so an old client against a new server and a new client against an
+      #     old server both keep today's behaviour.
+      #   * VALUES WIN — a group announced as empty that nonetheless carries
+      #     values keeps the values. The announcement only fills an absence.
+      #   * BRACKETS RESOLVE — `project[features]` lands at params[:project]
+      #     [:features], the same nesting `params` itself gets.
+      def apply_empty_groups(raw, names, schema, component_class)
+        return raw unless raw.is_a?(Hash) || raw.is_a?(ActionController::Parameters)
+        return raw unless names.is_a?(Array)
+
+        names.each do
+          next unless it.is_a?(String) || it.is_a?(Symbol)
+
+          path = ParamSchema.bracket_path(it.to_s)
+          # Only a name the action DECLARED as an array can be announced empty.
+          # Without this the field would reach every array param the schema has,
+          # from anywhere params come from — including the query string — and
+          # an undeclared name would write a junk key into the raw params. It
+          # also bounds the nesting: an invented `a[b][c][d]…` resolves against
+          # the declared shape or not at all, rather than building depth the
+          # request parser was never asked to allow.
+          # The announced name is the raw DOM name, so a scoped component sends
+          # "todo[tags]" while its schema is flat — peel the same one level
+          # unwrap_scope peels before asking the schema whether it declared it.
+          next unless schema.declares_array?(unscoped_path(path, component_class))
+
+          *parents, leaf = path
+          node = announcement_node(raw, parents)
+          next if node.nil?
+
+          node[leaf] = [] unless node.key?(leaf)
+        end
+        raw
+      end
+
+      # The node an announced group should be written into, or nil when the
+      # announcement must not touch `raw` at all.
+      #
+      # An announced group may be the only thing its parent carried, in which
+      # case the parent is absent too, and creating it is the announcement
+      # rather than a fabrication — the client said the group is there and
+      # empty. A parent that exists but is not a hash (the caller sent a scalar
+      # under that name) is left alone.
+      #
+      # A ROW INDEX among the PARENTS is the exception: there it is followed and
+      # never created. A `[]` group inside nested attributes is announced as
+      # "rows_attributes[0][features]", and creating the missing row would hand
+      # the action `rows_attributes: [{features: []}]` — a child record built
+      # out of a request that carried no params at all. A row that really is
+      # there usually says so through its other fields — `fields_for` renders
+      # the hidden id — so following is enough for every row the request
+      # describes. The shape where it is not is a BRAND-NEW row whose only
+      # control is the cleared group: nothing is persisted, so there is no id to
+      # travel with, and the announcement is refused. The CHANGELOG names that
+      # as a known limit rather than pretending it away. The check covers every
+      # segment still to be created, not just the first: bailing at the index
+      # after the container above it was created would leave that container
+      # behind, which coerces to an empty collection and is the same fabrication
+      # one level up.
+      # An index as the LAST segment is a different thing and IS created. There
+      # the row is not the way to the group, it IS the group —
+      # `matrix: [[:string]]` announced as "matrix[0]" — and the walk lets a
+      # name through only where the declaration names an ARRAY TYPE at that
+      # position, while the endpoint writes `[]` at the leaf either way, so
+      # what gets created is an empty array and never a record. Refusing it
+      # would make the last emptied row of a matrix unannounceable, which is
+      # the distinction this whole field exists to carry. It is also no more
+      # than a value can do: posting matrix[2][] beside row 0 produces the same
+      # shape, in both encodings.
+      def announcement_node(raw, parents)
+        node = raw
+        parents.each_with_index do |segment, index|
+          child = node[segment]
+          if child.is_a?(Hash) || child.is_a?(ActionController::Parameters)
+            node = child
+            next
+          end
+          return nil if node.key?(segment)
+          return nil if parents[index..].any? { ParamSchema.row_index?(it) }
+
+          node[segment] = {}
+          # Read it BACK: ActionController::Parameters converts a hash on
+          # assignment, so the object we just handed it is not the one it
+          # stored — writing into that copy would land nowhere.
+          node = node[segment]
+        end
+        node
+      end
+
+      # The path as the FLAT schema sees it: one scope level off the front when
+      # the component declares one and the name carries it.
+      def unscoped_path(path, component_class)
+        scope = component_class.reactive_scope if component_class.respond_to?(:reactive_scope)
+        return path unless scope && path.length > 1 && path.first == scope.to_s
+
+        path.drop(1)
       end
 
       # ---- verbose_errors dropped-param logging --------------------------
@@ -612,10 +737,13 @@ module Phlex
       # a flat name the schema declares one level down. Deliberately simple: it
       # searches one nesting level (hash / array-of-hash), no deeper.
       def shape_hint(path, schema)
-        segments = bracket_path(path)
+        segments = ParamSchema.bracket_path(path)
         if segments.length > 1
           leaf = segments.last
-          return unless schema.key?(leaf.to_sym)
+          # Both key forms: `compile` keeps what the declaration used, so a
+          # string-keyed schema is as valid as a symbol one — and a diagnostic
+          # that goes quiet for half the valid declarations is worse than none.
+          return unless declared_key?(schema, leaf)
 
           "schema declares :#{leaf} at top level; nested schemas look like " \
             "{ #{segments.first}: { #{leaf}: :string } }"
@@ -628,28 +756,19 @@ module Phlex
         end
       end
 
+      # A schema declares `name` whether it was written with a symbol or a
+      # string key; ParamSchema keeps whichever the author used.
+      def declared_key?(schema, name)
+        schema.key?(name.to_sym) || schema.key?(name.to_s)
+      end
+
       # The first schema key whose nested hash (or array-of-hash element
       # schema) declares `name` one level down.
       def nested_declaration_of(name, schema)
         schema.find do |_key, type|
           inner = type.is_a?(Array) ? type.first : type
-          inner.is_a?(Hash) && inner.key?(name.to_sym)
+          inner.is_a?(Hash) && declared_key?(inner, name)
         end&.first
-      end
-
-      # Matches each bracket segment in "items_attributes][0][qty]" — the part
-      # after the first "[". Hoisted to a frozen constant so the shape-hint path
-      # (verbose only) doesn't recompile the pattern per call.
-      BRACKET_SEGMENT = /[^\[\]]+/
-      private_constant :BRACKET_SEGMENT
-
-      # "invoice[date]" => ["invoice", "date"]. A key with no brackets is a
-      # single-element path. Used only to shape the dropped-param hint.
-      def bracket_path(key)
-        return [key] unless key.include?("[")
-
-        head, rest = key.split("[", 2)
-        [head, *rest.scan(BRACKET_SEGMENT)]
       end
 
       # ---- end verbose_errors logging ------------------------------------

@@ -6,7 +6,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-
 ### Added
 
 - **`bin/release` — the release front door, ported from pgbus.** Works out the
@@ -440,6 +439,110 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     to settle.
 
 ### Fixed
+
+- **A checkbox group collapsed to one boolean, and the chosen values never left
+  the browser (#258).** `#collectFields` wrote `fields[name] = field.checked` for
+  every checkbox, so several boxes sharing a `features[]` name overwrote each
+  other and the action received the LAST box's checked state — `{}` under a
+  `[:string]` schema, `"false"` under a flat `:string` one, silent either way,
+  while a native submission of the same boxes sends
+  `features[]=news&features[]=events`. A name ending in `[]` is now collected as
+  an array of the chosen values: a ticked box contributes its `value`, an
+  unticked one nothing, a `<select multiple>` its selected options. The suffix is
+  the only trigger — a group says so rather than being inferred from two controls
+  sharing a name.
+
+  Three shapes keep their meaning on purpose: a lone checkbox without `[]` stays
+  the documented yes/no boolean, a radio group keeps its single checked value
+  with or without the suffix, and a hidden input sharing a name with a checkbox
+  is that box's companion. The companion is identified by the shared name, not
+  by its value, because Rails renders three of them: `check_box` emits
+  `value="0"`, `check_box(..., multiple: true)` the same under a `[]` name, and
+  `collection_check_boxes` a blank one — or none at all with
+  `unchecked_value: nil`. Reading the second shape by value collected
+  `["0","0","0","3"]` for three boxes with the third ticked.
+
+  A form body cannot carry an empty array, so a cleared group is ANNOUNCED: its
+  key stays absent from `params` and its name rides in a field of its own,
+  `empty_groups[]`, which the endpoint fills with `[]`. The field is additive —
+  a request without it behaves exactly as before — and values always win over an
+  announcement. A blank entry (`params[name][]=""`) was the alternative and is
+  ambiguous: Rails leaves `[""]` to the caller, and the schema reads it per
+  element type (`[:string]` keeps it, `[:integer]` coerces `[0]`, `[:date]` and
+  `[:file]` drop the key), so treating it as "cleared" would have changed all
+  four — for a `[:file]` param backing a `has_many_attached`, the difference
+  between "the field did not come in" and purging the attachments.
+
+  `post_reactive_multipart` takes `empty_groups:` so a request spec can
+  reproduce a cleared group the way the client sends it; omitted, the body is
+  exactly what it was before the field existed. `ParamSchema.bracket_path(key)`,
+  `ParamSchema.row_index?(segment)` and `ParamSchema#declares_array?(path)` are
+  public for the same resolution — one parser for the wire format, one test for
+  what counts as a row, and one answer to "does this declaration name an array
+  here".
+
+  An announcement resolves against the DECLARED shape and nothing else. A
+  string-keyed declaration (`params: { "features" => [:string] }`) fills like a
+  symbol one — `compile` keeps whichever form the author wrote, so a lookup
+  that tried only symbols refused half the valid declarations. A group inside
+  a collection resolves through its row index — `rows_attributes[0][features]`
+  for nested attributes, `matrix[0]` for an array of arrays — because a
+  declaration describes its element once while the wire names a row, so the
+  index has no counterpart to look up. Anything else —
+  a name the action never declared, a declared param that is not an array,
+  invented nesting, a row key that is not an index — is dropped rather than
+  written into the raw params.
+
+  Where a row index sits in the announced name decides whether it may be
+  created. An index ON THE WAY to the group is followed and never created: for
+  `rows_attributes[0][features]`, bringing the row into being would let the
+  ANNOUNCEMENT hand the action `rows_attributes: [{ features: [] }]` — a child
+  record for `accepts_nested_attributes_for` to take at face value — out of a
+  request that carried nothing else. A row that is really there says so through
+  its other fields, and `fields_for` renders the hidden id, so following it is
+  enough. When such an index is refused, the container above it is refused with
+  it rather than left behind, because an empty collection there reads as "the
+  caller cleared every row".
+
+  The limit of that rule, measured rather than assumed: it constrains what an
+  announcement may build, not what the endpoint accepts. A JSON body from the
+  same DOM carries `rows_attributes[0][features][]` as an empty array outright
+  and does produce `[{ features: [] }]`. So for the one shape where a row
+  carries NOTHING but an emptied group, the two encodings disagree — the form
+  body reads as "no rows", the JSON body as "one row with an empty group".
+  Every shape in which the row carries anything else, which is what `fields_for`
+  renders, agrees.
+
+  An index as the LAST segment is created, because there the row IS the group:
+  `matrix: [[:string]]` announces a cleared row as `matrix[0]`, and the walk
+  admits a name only where the declaration names an ARRAY TYPE at that
+  position, while the endpoint writes `[]` at the leaf either way — so what
+  appears is an empty array and never a record. Refusing it would leave the last
+  emptied row of a matrix with no way to say so — the distinction the field
+  exists to carry. It is also no more than a value can do: `matrix[2][]` posted
+  beside row 0 produces the same shape, in both encodings.
+
+  `reactive_persist` drafts such a group as the list of ticked values and
+  restores exactly those boxes; before, the draft held one boolean and the
+  restore ticked every box of the group. A non-checkbox control sharing the
+  group's name additionally threw inside the draft write, which is swallowed —
+  the root then persisted nothing at all, silently. On restore, such a control
+  now keeps what the server rendered: the list records the values, not which
+  control each one came from, so replaying it would paste `freeform,news` into
+  a text field, an editor, or a contenteditable.
+
+  Drafts written before this release are not discarded, but their group key is
+  no longer applied to the controls that read a list: it holds one boolean (or,
+  in a mixed group, whichever control wrote last), and applying that kept
+  causing damage for as long as the draft lived — by default seven days after
+  the upgrade. The damage differed by control. A checkbox group came back fully
+  ticked. A `<select multiple>` sharing the group's name lost its rendered
+  selection instead, because under `restore: "always"` the select branch skips
+  the "the server had a say" check and matches `Set{"true"}` against its
+  options, where nothing matches. The next snapshot replaces the key with the
+  list. Only that one key changed meaning, which is why `PERSIST_VERSION` stays
+  where it is: bumping it would also throw away the drafted prose of every form
+  that has no checkbox group at all.
 
 - **`reply.pending` kept its settle handle under
   `enqueue_after_transaction_commit = true` (#254).** The handle was captured in

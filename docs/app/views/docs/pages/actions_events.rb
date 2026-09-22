@@ -124,6 +124,40 @@ module Views
               not the conceptual params. A flat `{ date: :string }` against
               `invoice[date]` inputs matches nothing and the value is silently
               dropped.
+
+              **Checkbox groups.** Controls sharing a name that ends in `[]` are
+              collected as an **array of the chosen values**: a ticked box
+              contributes its `value`, an unticked one nothing, a `<select
+              multiple>` its selected options. Declare it as an array type.
+
+              ```ruby
+              action :save, params: { features: [:string] }
+              # <input type="checkbox" name="features[]" value="news">
+              ```
+
+              Nothing ticked is an **empty array**, not a missing key, so an action
+              can tell a cleared group from one that never rendered. A form body
+              cannot carry an empty array, so there the group is **announced**:
+              its key stays out of `params` and its name rides in
+              `empty_groups[]`, a field of its own beside `token`/`act`/`params`,
+              which the endpoint fills with `[]`. The field is additive, values
+              sent for a group win over an announcement, and an announcement
+              only fills what the action DECLARED as an array — including a
+              group inside a collection, which resolves through its row index
+              (`rows_attributes[0][features]` for nested attributes,
+              `matrix[0]` for an array of arrays). An index on the way to the
+              group is followed, never created — a row the request did not
+              carry stays absent rather than becoming a child record. An index
+              as the LAST segment is created, because there the row IS the
+              group.
+
+              Three shapes keep their own meaning: a lone checkbox without `[]`
+              stays the yes/no boolean, a radio group keeps its single checked
+              value with or without `[]`, and a hidden input sharing a name with a
+              checkbox is that box's **companion** — Rails' `check_box` emits one
+              carrying the `unchecked_value`, `"0"` by default — and contributes
+              nothing. A hidden input *without* a same-named checkbox is an
+              ordinary value, the usual shape for a list JS maintains.
             MD
 
             DocsUI::Callout(:tip, title: 'Files & multipart') do

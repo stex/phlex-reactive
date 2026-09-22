@@ -491,12 +491,48 @@ def view_template
 end
 ```
 
-> **One multipart caveat:** `FormData` can't carry an *empty* array or hash, so on
-> the multipart (file-present) path an empty `[]`/`{}` param is **omitted** and the
-> action's keyword default applies — it does **not** arrive as an explicit empty
-> collection the way it does over JSON. If you rely on sending `tags: []` to clear
-> a collection, send that action *without* a file (the JSON path). A non-empty
-> nested/array param rides along fine next to a file.
+> **One multipart caveat:** `FormData` can't carry an *empty* array or hash. A
+> **checkbox group** (a name ending in `[]`) is covered: a cleared group is
+> announced instead — its key stays out of `params` and its name rides in
+> `empty_groups[]`, a field of its own beside `token`/`act`/`params`, which the
+> endpoint fills with `[]`. So JSON and form bodies agree about a cleared group,
+> with one measured exception noted below. The field is additive: a request
+> without it behaves exactly as before, and values sent for a group always win
+> over an announcement. An announcement only fills what the action DECLARED as
+> an array — a group inside a collection resolves through its row index
+> (`rows_attributes[0][features]` for nested attributes, `matrix[0]` for an
+> array of arrays), a declaration written with string keys resolves like a
+> symbol one, and any other name is ignored rather than written into the params.
+> A row index on the way to the group is *followed*, never *created* —
+> announcing `rows_attributes[0][features]` fills a row the request carried and
+> never brings one into being. An index as the LAST segment is created, because
+> there the row IS the group (`matrix[0]`), and the declaration has to name an
+> array type at that position. The one shape where the two encodings disagree is
+> a brand-new nested-attributes row whose only control is the cleared group: it
+> carries no id to travel with, so the form body reads as "no rows" where the
+> JSON body reads as one row with an empty group. Every **other** empty
+> `[]`/`{}` param is still **omitted** on the multipart (file-present) path and
+> the action's keyword default applies. If you rely on sending `tags: []` to
+> clear a collection through a param that is not a `[]`-named group, send that
+> action *without* a file (the JSON path). A non-empty nested/array param rides
+> along fine next to a file.
+
+**Checkbox groups.** Several controls sharing a name that ends in `[]` are collected
+as an **array of the chosen values** — a ticked box contributes its `value`, an
+unticked one nothing, a `<select multiple>` its selected options. Nothing ticked is
+an empty array, not a missing key, so an action can tell a cleared group from one
+that never rendered. Declare it as an array type:
+
+```ruby
+action :save, params: { features: [:string] }   # <input type="checkbox" name="features[]" value="news">
+```
+
+Three shapes keep their own meaning: a lone checkbox without `[]` stays the
+documented yes/no boolean; a radio group keeps its single checked value, `[]` or
+not; and a hidden input sharing a name with a checkbox is that box's **companion**
+(Rails' `check_box` emits one, carrying the `unchecked_value`) and contributes
+nothing. A hidden input *without* a same-named checkbox is an ordinary value — the
+usual shape for a list maintained by JS.
 
 **Array & nested params.** Wrap a type in an array for an array param, or a hash
 schema in an array for Rails-style nested attributes — so one reactive action can
@@ -3222,8 +3258,10 @@ endpoint maps it to 403). Matchers: `have_reactive_replace`,
 refresh so a reply that would silently break the next click fails your test.
 
 **HTTP helpers** — `post_reactive_action(component_or_class, act, params:, payload:)`
-and `post_reactive_multipart(...)` POST a signed token to
-`Phlex::Reactive.action_path` exactly as the client does. **Token minting** —
+and `post_reactive_multipart(..., empty_groups: [])` POST a signed token to
+`Phlex::Reactive.action_path` exactly as the client does; `empty_groups:` names
+the `[]` groups the client cleared, which a form body announces rather than
+carries. **Token minting** —
 `reactive_token_for(component_or_class, payload = {})`.
 
 > `verbose_errors` defaults ON in test (it changes only an error BODY, never a
