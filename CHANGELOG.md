@@ -454,9 +454,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sharing a name.
 
   **That makes the suffix a migration point.** ANY `[]`-named control now
-  contributes to an array, including a single one: a lone `<input type="text"
-  name="tags[]">` used to post `"abc"` and now posts `["abc"]`. Against a flat
-  `params: { tags: :string }` that coerces to the literal `"[\"abc\"]"` —
+  contributes to an array, including a single one and including a named rich
+  editor or bare contenteditable, which the collector reads in a second pass: a
+  lone `<input type="text" name="tags[]">` used to post `"abc"` and now posts
+  `["abc"]`. An editor sharing its `[]` name with another control now ADDS its
+  value to the group rather than standing down behind it, so the entry count
+  changes there too — a ready but empty editor contributes an empty string, the
+  way an empty text field in the same group does, while an unticked box still
+  contributes nothing and a hidden input that merely mirrors a named editor is
+  that editor's companion and contributes nothing either. Against a flat
+  `params: { tags: :string }` the array coerces to the literal `"[\"abc\"]"` —
   silently, with a 200. A control whose name ends in `[]` has to be declared as
   an array type (`tags: [:string]`), or renamed without the suffix if it was
   never meant as a list.
@@ -493,7 +500,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   contributor has no such ambiguity — its single entry can only have come from
   that control — so a plain field whose name merely ends in `[]`, the usual
   shape for a list JS maintains, keeps its draft exactly as it did before
-  groups existed.
+  groups existed. A `<select multiple>` reads a list by matching option values,
+  which is only sound when the list is its own: sharing a group with another
+  contributor, it too keeps what the server rendered, since a text value that
+  happens to equal an option would otherwise select it.
 
   Drafts written before this release are not discarded, but their group key is
   no longer applied to the controls that read a list: it holds one boolean (or,

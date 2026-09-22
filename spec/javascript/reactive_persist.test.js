@@ -781,10 +781,13 @@ test("a lone checkbox keeps drafting its boolean", () => {
   expect(storage.json(KEY).fields.gift).toBe(true)
 })
 
-test("an editor sharing a group's name appends instead of clobbering the array", () => {
-  // Editors are collected after the native controls, so before the fix the
-  // editor's string replaced the group's array — and the next box's push threw
-  // inside the swallowed draft write, leaving the root with no draft at all.
+test("a contenteditable sharing a group's name appends instead of clobbering the array", () => {
+  // Editors and contenteditables are collected after the native controls, so
+  // before the fix the last writer won per name: the contenteditable's string
+  // replaced the checkbox's entry and the draft held only "typed" — the
+  // toEqual(["a", "typed"]) below is the guard. The throw that empties the
+  // draft needs a writer FOLLOWED by a box; that setup is "a text control
+  // sharing the group's name".
   const { controller, el } = mount(`
     <input type="checkbox" name="notes[]" value="a">
     <div contenteditable="true" name="notes[]">typed</div>
@@ -988,12 +991,12 @@ test("a stale group key does not wipe a multi-select's server selection under re
   // would also hold if the draft never arrived at all — a wrong key, an
   // expired ttl, a restore that did not run — so the third one is what makes
   // this a guard rather than a description of an untouched page.
-  storage.seed(KEY, { v: 1, savedAt: now - 1000, fields: { "colors[]": true, note: "drafted" } })
+  seedDraft({ "colors[]": true, note: "drafted" })
   const { controller, el } = mount(
     `<input type="checkbox" name="colors[]" value="red">
      <select multiple name="colors[]"><option value="blue" selected>blue</option><option value="green">green</option></select>
      <input type="text" name="note" value="">`,
-    { payload: { key: "apply", ttl: 60, debounce: 300, restore: "always" } },
+    { payload: { ...PAYLOAD, restore: "always" } },
   )
   controller.connect()
 
@@ -1020,4 +1023,25 @@ test("a late editor does not adopt the single entry a checkbox left in the group
   expect(q("lexxy-editor").value).toBe("<p><br></p>")
   expect(editorSets).toBe(0)
   expect(q('[value="a"]').checked).toBe(true)
+})
+
+test("a multi-select in a MIXED group keeps the selection the server rendered", () => {
+  // A multi-select reads a list by matching option values, which only holds
+  // when the list is its own. Here a text field contributes too, and its value
+  // happens to equal an option — measured before the fix, the select came back
+  // with both options chosen, one of them the text field's.
+  // `note` proves the draft arrived: the select assertion alone would also hold
+  // for a draft that never came — wrong key, expired ttl, a restore that did
+  // not run.
+  seedDraft({ "tags[]": ["blue", "freitext"], note: "drafted" })
+  const { controller, el } = mount(
+    `<select multiple name="tags[]"><option value="blue" selected>blue</option><option value="freitext">freitext</option></select>
+     <input type="text" name="tags[]" value="">
+     <input type="text" name="note" value="">`,
+    { payload: { ...PAYLOAD, restore: "always" } },
+  )
+  controller.connect()
+
+  expect([...el.querySelector("select").options].filter((o) => o.selected).map((o) => o.value)).toEqual(["blue"])
+  expect(el.querySelector('[name="note"]').value).toBe("drafted")
 })

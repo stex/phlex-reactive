@@ -43,6 +43,12 @@ class FakeNode {
     multiple = false,
     options = null,
     files = null,
+    // A bare [contenteditable] / rich editor, which #collectFields reads in a
+    // SECOND pass. The fixture needs it to cover a `[]`-named editor; pass
+    // `value: null` so the read falls through to textContent, as it does for a
+    // real contenteditable.
+    editor = false,
+    textContent = null,
   } = {}) {
     this.tag = tag.toLowerCase()
     this.name = name
@@ -52,6 +58,11 @@ class FakeNode {
     this.multiple = multiple
     this.options = options
     this.files = files // array of File for a file input
+    this.editor = editor
+    this.textContent = textContent
+    // Mirrors the DOM property the controller reads to tell a RICH editor
+    // (lexxy/trix, which upgrade asynchronously) from a bare contenteditable.
+    this.localName = this.tag
     this.parentNode = null
     this.children = []
     this.dataset = {}
@@ -91,7 +102,7 @@ class FakeNode {
       return ["input", "select", "textarea"].includes(this.tag) && this.name != null
     }
     if (selector.includes("lexxy-editor")) {
-      return false
+      return this.editor && this.name != null
     }
     return false
   }
@@ -357,4 +368,85 @@ test("a radio group keeps its single value even under a [] name", async () => {
   )
 
   expect(await collect(root)).toEqual({ "plan[]": "pro" })
+})
+
+test("an editor CONTRIBUTES to a group instead of standing down behind it", async () => {
+  // With a filled group already in the slot the old pass stood down entirely —
+  // `existing` was neither null nor "" — so the editor's value never reached
+  // the wire at all, while the draft snapshot pushed the same control into an
+  // array — the wire and the
+  // draft disagreeing about one field, and a declared array type seeing a
+  // string. It appends to the group slot now, exactly as the first pass does.
+  const root = new FakeNode({ tag: "div", controller: "reactive" })
+  root.append(
+    checkbox("notes[]", "a", true),
+    new FakeNode({ tag: "div", name: "notes[]", editor: true, value: null, textContent: "typed" }),
+  )
+
+  expect(await collect(root)).toEqual({ "notes[]": ["a", "typed"] })
+})
+
+test("a hidden twin of a named editor contributes nothing under a [] name", () => {
+  // An editor that mirrors its serialized value into a same-named hidden is the
+  // shape the second pass exists for. Under a `[]` name both would otherwise
+  // push and the value would ride the wire TWICE, while the draft — which never
+  // sees hidden inputs — holds one. The hidden is that editor's companion, the
+  // same rule Rails' unchecked_value default gets.
+  const root = new FakeNode({ tag: "div", controller: "reactive" })
+  root.append(
+    hidden("notes[]", "<p>x</p>"),
+    new FakeNode({ tag: "trix-editor", name: "notes[]", editor: true, value: "<p>x</p>" }),
+  )
+
+  return expect(collect(root)).resolves.toEqual({ "notes[]": ["<p>x</p>"] })
+})
+
+test("a hidden WITHOUT a same-named editor still contributes under a [] name", () => {
+  // The counterweight: a list JS maintains as hidden inputs is an ordinary
+  // shape, and those values are chosen values.
+  const root = new FakeNode({ tag: "div", controller: "reactive" })
+  root.append(hidden("tag_ids[]", "7"), hidden("tag_ids[]", "9"))
+
+  return expect(collect(root)).resolves.toEqual({ "tag_ids[]": ["7", "9"] })
+})
+
+test("a []-named radio keeps its chosen value when an editor shares the name", () => {
+  // A radio keeps its single value with or without the suffix — that is why
+  // #arrayFieldNames excepts it. An editor sharing the name must not turn that
+  // scalar into a group: measured before this guard, the post came back as
+  // {"pick[]": ["typed"]} and the chosen value was gone.
+  const root = new FakeNode({ tag: "div", controller: "reactive" })
+  root.append(
+    new FakeNode({ tag: "input", type: "radio", name: "pick[]", value: "a", checked: true }),
+    new FakeNode({ tag: "div", name: "pick[]", editor: true, value: null, textContent: "typed" }),
+  )
+
+  return expect(collect(root)).resolves.toEqual({ "pick[]": "a" })
+})
+
+test("an unupgraded rich editor does not empty its hidden twin's group", () => {
+  // Trix defines its elements in a setTimeout after load, so a save can run
+  // while the editor is still a plain unupgraded tag with nothing to read.
+  // Its hidden twin carries the real value then — suppressing the hidden as a
+  // companion and pushing the editor's "" would post an empty group over it,
+  // which is issue #8 under a `[]` name. Measured before this guard:
+  // {"notes[]": [""]}.
+  const root = new FakeNode({ tag: "div", controller: "reactive" })
+  root.append(
+    hidden("notes[]", "<p>real</p>"),
+    new FakeNode({ tag: "trix-editor", name: "notes[]", editor: true, value: null, textContent: null }),
+  )
+
+  return expect(collect(root)).resolves.toEqual({ "notes[]": ["<p>real</p>"] })
+})
+
+
+test("a LONE editor under a [] name posts an array, not a scalar", async () => {
+  // The shape the fix was measured on: with no standard control under the
+  // name there is no slot, and the old pass assigned — `{"notes[]": "typed"}`
+  // on the wire against a declared array type, while the draft held ["typed"].
+  const root = new FakeNode({ tag: "div", controller: "reactive" })
+  root.append(new FakeNode({ tag: "div", name: "notes[]", editor: true, value: null, textContent: "typed" }))
+
+  return expect(collect(root)).resolves.toEqual({ "notes[]": ["typed"] })
 })

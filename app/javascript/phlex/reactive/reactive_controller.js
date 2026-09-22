@@ -1236,6 +1236,14 @@ function persistEditorReady(el) {
   return typeof el.value === "string"
 }
 
+// The same question for #collectFields. A RICH editor (lexxy/trix) is only
+// ready once its custom element upgraded — Trix defines its elements in a
+// setTimeout after load — and reading it before that yields "", which is issue
+// #8. A bare [contenteditable] is plain DOM and always ready.
+function collectorEditorReady(el) {
+  return PERSIST_EDITOR_TAGS.has(el.localName) ? persistEditorReady(el) : true
+}
+
 // Ask the editor whether it is empty (Lexxy `isEmpty`; Trix
 // `editor.getDocument().isEmpty()`), else the exact-string fallback. An
 // attachment-only server body is therefore NON-blank and never overwritten.
@@ -1372,6 +1380,15 @@ function persistApply(root, payload, fields) {
     if (!Object.hasOwn(fields, name)) continue
     let value = fields[name]
     if (value === null || value === undefined) continue
+    // A multi-select reads a list by matching option values, which is only
+    // sound when the list is ITS list. In a group with another contributor the
+    // entries are mixed, and a text value that happens to equal an option
+    // would select it — measured, a draft of ["blue","freitext"] from a select
+    // plus a text field selected both options. `?? 0` because a name without
+    // the suffix is not in the map at all, and a plain `<select multiple
+    // name="colors">` must keep restoring.
+    if (Array.isArray(value) && persistSelectMultiple(el) && (groupSizes.get(name) ?? 0) > 1) continue
+
     // An array belongs to a `[]` group, and only a control that can pick ITS
     // entry out of the list may read it: a checkbox matches by value, a
     // multi-select by option. Everything else — editors, contenteditables,
@@ -4027,19 +4044,20 @@ export default class extends Controller {
       }
     })
     const arrayNames = this.#arrayFieldNames(controls)
-    const companionNames = this.#companionNames(controls)
+    const companionNames = this.#companionNames(controls, this.#editorNames(owns))
     for (const field of controls) {
       if (arrayNames.has(field.name)) {
         const slot = fields[field.name] ?? (fields[field.name] = [])
         if (field.type === "checkbox" || field.type === "radio") {
           // An unchecked box contributes NOTHING, the way a native submission
-          // leaves it out. The group's value is the list of checked values, and
-  // with none checked that list stays an EMPTY ARRAY rather than
-  // vanishing, so over the JSON path the action can tell "the operator
-  // cleared them" from "the group never rendered" and an [:string] schema
-  // coerces [] to []. A form body cannot carry the empty array at all, and
-  // the client uses one as soon as a file input holds a file — there the key
-  // is simply absent; see the README's multipart caveat.
+          // leaves it out. The group's value is the list of checked values,
+          // and with none checked that list stays an EMPTY ARRAY rather than
+          // vanishing, so over the JSON path the action can tell "the operator
+          // cleared them" from "the group never rendered" and an [:string]
+          // schema coerces [] to []. A form body cannot carry the empty array
+          // at all, and the client switches to one as soon as a file input
+          // holds a file — there the key is simply absent; see the README's
+          // multipart caveat.
           if (field.checked) slot.push(field.value)
         } else if (field.type === "hidden") {
           if (!companionNames.has(field.name)) slot.push(field.value)
@@ -4061,8 +4079,11 @@ export default class extends Controller {
     // skips them — without this, a reactive save posts an empty value and
     // silently wipes the field (issue #8). Read whatever the element exposes:
     // a custom editor's serialized `.value`, else its contenteditable text.
-    // Only fill a name the standard controls left absent or empty, so a synced
-    // hidden input (e.g. Trix mirrors into one) still wins when populated.
+    // Under a plain name: only fill what the standard controls left absent or
+    // empty, so a synced hidden input (e.g. Trix mirrors into one) still wins
+    // when populated. Under a `[]` name the editor APPENDS to the group slot
+    // instead — and its hidden twin is suppressed as a companion, so the value
+    // still rides the wire exactly once.
     this.element
       .querySelectorAll("[name]:is(lexxy-editor, trix-editor, [contenteditable=''], [contenteditable=true], [contenteditable=plaintext-only])")
       .forEach((el) => {
@@ -4071,9 +4092,33 @@ export default class extends Controller {
         // property — only the attribute — so read getAttribute, not el.name.
         const name = el.getAttribute("name")
         if (!name) return
+        const own = el.value ?? el.textContent ?? el.innerHTML ?? ""
+        // A `[]` name is a group here too, companion rule included: the
+        // editor APPENDS its value instead of replacing the slot. Assigning a
+        // scalar would have posted `{"notes[]": "<p>x</p>"}` while the draft
+        // snapshot pushed the same control into an array — the wire and the
+        // draft disagreeing about one field, and a declared array type seeing
+        // a string.
         const existing = fields[name]
+        // An editor that has not upgraded yet contributes NOTHING to a group:
+        // its "" would ride the wire as a phantom entry beside the real value
+        // its hidden twin carries.
+        if (String(name).endsWith("[]") && !collectorEditorReady(el)) return
+        if (String(name).endsWith("[]") && (existing === undefined || Array.isArray(existing))) {
+          const slot = Array.isArray(existing) ? existing : (fields[name] = [])
+          slot.push(own)
+          return
+        }
+        // A scalar already under a `[]` name can only be a RADIO's: a radio
+        // means "pick one" and keeps its single value with or without the
+        // suffix, which is why #arrayFieldNames excepts it. Converting that to
+        // a group here would discard the chosen value — measured, the post lost
+        // it — so the editor stands down and the rule below applies, which
+        // never overwrites a populated name.
+        // Only fill what the standard controls left absent or empty, so a
+        // synced hidden input still wins when populated.
         if (existing == null || existing === "") {
-          fields[name] = el.value ?? el.textContent ?? el.innerHTML ?? ""
+          fields[name] = own
         }
       })
     return { fields, files }
@@ -4116,9 +4161,31 @@ export default class extends Controller {
   // the test. What identifies a companion is that a checkbox shares its name.
   // A hidden WITHOUT a same-named checkbox is a list JS maintains, and its
   // value is a chosen value like any other.
-  #companionNames(controls) {
-    const names = new Set()
+  #companionNames(controls, editorNames) {
+    const names = new Set(editorNames)
     for (const field of controls) if (field.type === "checkbox") names.add(field.name)
+    return names
+  }
+
+  // The names carried by NAMED editors, read from the same query the second
+  // pass uses. A hidden input sharing a name with one is that editor's twin —
+  // an editor that mirrors its serialized value into a hidden is the shape the
+  // second pass was written for — so under a `[]` name the hidden contributes
+  // nothing and the editor speaks for both. Without this the value would ride
+  // the wire TWICE while the draft, which never sees hidden inputs, holds one.
+  // The canonical Rails Trix pair is unaffected: there the NAME sits on the
+  // hidden and the editor points at it with `input=`, so it has no name here.
+  #editorNames(owns) {
+    const names = new Set()
+    this.element.querySelectorAll(`[name]${PERSIST_EDITOR_SELECTOR}`).forEach((el) => {
+      if (!owns(el)) return
+      // Only a READY editor speaks for its hidden twin. Before the upgrade the
+      // editor has nothing to say, and suppressing the hidden would post an
+      // empty group where the real value was — issue #8 under a `[]` name.
+      if (!collectorEditorReady(el)) return
+      const name = el.getAttribute("name")
+      if (name) names.add(name)
+    })
     return names
   }
 

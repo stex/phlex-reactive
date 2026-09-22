@@ -137,8 +137,9 @@ module Views
 
               Nothing ticked is an **empty array**, not a missing key, so an action
               can tell a cleared group from one that never rendered. A form body
-              cannot carry an empty array at all — and the client sends one as
-              soon as a file input holds a file — so a cleared group is absent
+              cannot carry an empty array at all, and the client switches to a
+              form body as soon as a file input holds a file — so a cleared
+              group is absent
               there and the keyword default applies. See the multipart caveat in
               the README.
 
