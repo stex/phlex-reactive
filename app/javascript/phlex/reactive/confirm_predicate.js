@@ -19,7 +19,13 @@
 //
 //   fields — a plain object of { name: value } over the trigger root's collected
 //            controls (the SAME snapshot reactive_compute reads — #collectFields).
-//            Values are the raw control values (strings; a checkbox is a boolean).
+//            Values are the raw control values (strings; a lone checkbox is a
+//            boolean; a `[]` group is an array of the TICKED values, issue #258 —
+//            before that fix such a group arrived as one box's checked state).
+//            A group with nothing ticked is PRESENT as an empty array, not
+//            missing. The key keeps its suffix, so it is `fields["tags[]"]`,
+//            and `[]` is truthy in JS — test `fields["tags[]"].length`, never
+//            `if (fields["tags[]"])`.
 //
 // It returns truthy to WARN (the confirm dialog fires with the declared message)
 // or falsy to PROCEED with no dialog. The predicate is soft-validation UX, NOT

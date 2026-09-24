@@ -1077,6 +1077,7 @@ const PERSIST_PREFIX = "phlex-reactive:persist:"
 // Never persisted regardless of author intent: no server default to restore
 // into (hidden, file), secrets (password), and non-value controls.
 const PERSIST_EXCLUDED_TYPES = new Set(["hidden", "file", "password", "submit", "button", "reset", "image"])
+const PERSIST_NO_VALUE = Symbol("persist-no-value")
 const PERSIST_STATE_ATTR = "data-reactive-persist-state"
 // The editor query #collectFields reads (minus the [name] guard — an editor's
 // name may live on its IDL `name` getter: Trix's `input=`-paired hidden input).
@@ -1235,6 +1236,14 @@ function persistEditorReady(el) {
   return typeof el.value === "string"
 }
 
+// The same question for #collectFields. A RICH editor (lexxy/trix) is only
+// ready once its custom element upgraded — Trix defines its elements in a
+// setTimeout after load — and reading it before that yields "", which is issue
+// #8. A bare [contenteditable] is plain DOM and always ready.
+function collectorEditorReady(el) {
+  return PERSIST_EDITOR_TAGS.has(el.localName) ? persistEditorReady(el) : true
+}
+
 // Ask the editor whether it is empty (Lexxy `isEmpty`; Trix
 // `editor.getDocument().isEmpty()`), else the exact-string fallback. An
 // attachment-only server body is therefore NON-blank and never overwritten.
@@ -1258,6 +1267,33 @@ function persistSelectMultiple(el) {
   return el.tagName === "SELECT" && el.multiple
 }
 
+// How many controls can contribute a value under each `[]` name, counted the
+// way persistSnapshot fills the slot — a radio is the exception there and here.
+// A group of ONE is unambiguous: its single entry can only have come from that
+// control.
+function persistGroupSizes(controls) {
+  const sizes = new Map()
+  for (const { el, name } of controls) {
+    if (el.type === "radio" || !String(name).endsWith("[]")) continue
+    sizes.set(name, (sizes.get(name) ?? 0) + 1)
+  }
+  return sizes
+}
+
+// The value a control that cannot pick its own entry out of a list may take.
+// A list belongs to a `[]` group, and in a group of two or more nothing says
+// which entry came from which control — restoring it would paste
+// "freeform,news" into a text field. A group of ONE has no such ambiguity, and
+// refusing it would silently drop the draft of a plain field whose name merely
+// ends in `[]` (a list JS maintains), which worked before groups existed.
+// Returns PERSIST_NO_VALUE when the control must keep what the server rendered.
+function persistGenericValue(value, name, sizes) {
+  if (!Array.isArray(value)) return value
+  if (sizes.get(name) !== 1 || value.length !== 1) return PERSIST_NO_VALUE
+
+  return value[0]
+}
+
 // Snapshot the owned controls: radio → the checked value (null when the group
 // has none, so a restore leaves it alone), checkbox → checked, multi-select →
 // the selected values, a rich editor → its serialized `value` (omitted while
@@ -1265,18 +1301,52 @@ function persistSelectMultiple(el) {
 // its textContent, else .value. Mirrors #collectFields' reads.
 function persistSnapshot(root, payload) {
   const fields = {}
+  // A `[]` name is a group for every control that can contribute a value —
+  // checkboxes, selects, text inputs, editors and contenteditables all append
+  // to one array, mirroring #collectFields. The one exception is a RADIO group,
+  // which means "pick one" and keeps its single value with or without the
+  // suffix, exactly as the collector treats it.
+  //
+  // Reading the slot without this (fields[name] ?? []) breaks as soon as a
+  // non-checkbox shares the group's name: a text input or an editor leaves a
+  // string there, `.push` on it throws inside the draft write, and that write
+  // is swallowed — the root then persists nothing at all, silently. Editors
+  // are collected AFTER the native controls, so they always land last.
+  const groupSlot = (name) => {
+    const existing = fields[name]
+    return Array.isArray(existing) ? existing : (fields[name] = [])
+  }
   for (const { el, name, kind } of persistControls(root, payload)) {
+    const group = String(name).endsWith("[]")
     if (kind === "editor") {
-      if (persistEditorReady(el)) fields[name] = el.value
+      if (persistEditorReady(el)) {
+        if (group) groupSlot(name).push(el.value)
+        else fields[name] = el.value
+      }
     } else if (kind === "contenteditable") {
-      fields[name] = el.textContent ?? ""
+      const text = el.textContent ?? ""
+      if (group) groupSlot(name).push(text)
+      else fields[name] = text
     } else if (el.type === "radio") {
       if (el.checked) fields[name] = el.value
       else if (!Object.hasOwn(fields, name)) fields[name] = null
     } else if (el.type === "checkbox") {
-      fields[name] = el.checked
+      // A `[]` group drafts the list of ticked values, mirroring #collectFields
+      // (issue #258). Without this the boxes overwrote each other and the draft
+      // held one boolean, which the restore then applied to every box of the
+      // group. A lone checkbox keeps the boolean it has always been.
+      if (group) {
+        const slot = groupSlot(name)
+        if (el.checked) slot.push(el.value)
+      } else {
+        fields[name] = el.checked
+      }
     } else if (persistSelectMultiple(el)) {
-      fields[name] = [...el.options].filter((o) => o.selected).map((o) => o.value)
+      const selected = [...el.options].filter((o) => o.selected).map((o) => o.value)
+      if (group) groupSlot(name).push(...selected)
+      else fields[name] = selected
+    } else if (group) {
+      groupSlot(name).push(el.value)
     } else {
       fields[name] = el.value
     }
@@ -1292,10 +1362,61 @@ function persistSnapshot(root, payload) {
 function persistApply(root, payload, fields) {
   const always = payload.restore === "always"
   const controls = persistControls(root, payload)
+  // Which group names the SERVER rendered with a box already ticked. Computed
+  // BEFORE the loop on purpose: the loop writes `checked`, so asking this
+  // question from inside it would read THIS restore's own work — the first box
+  // it ticks makes every later box of the same group look server-rendered, and
+  // a draft of two values comes back as one. The radio branch below asks the
+  // same question inline and stays correct only because a radio group holds a
+  // single value.
+  const groupSizes = persistGroupSizes(controls)
+  const serverTicked = new Set()
+  for (const control of controls) {
+    if (control.kind === "native" && control.el.type === "checkbox" && control.el.checked) {
+      serverTicked.add(control.name)
+    }
+  }
   for (const { el, name, kind } of controls) {
     if (!Object.hasOwn(fields, name)) continue
-    const value = fields[name]
+    let value = fields[name]
     if (value === null || value === undefined) continue
+    // A multi-select reads a list by matching option values, which is only
+    // sound when the list is ITS list. In a group with another contributor the
+    // entries are mixed, and a text value that happens to equal an option
+    // would select it — measured, a draft of ["blue","freitext"] from a select
+    // plus a text field selected both options. `?? 0` because a name without
+    // the suffix is not in the map at all, and a plain `<select multiple
+    // name="colors">` must keep restoring.
+    if (Array.isArray(value) && persistSelectMultiple(el) && (groupSizes.get(name) ?? 0) > 1) continue
+
+    // An array belongs to a `[]` group, and only a control that can pick ITS
+    // entry out of the list may read it: a checkbox matches by value, a
+    // multi-select by option. Everything else — editors, contenteditables,
+    // text inputs — keeps what the server rendered, because the list does not
+    // record which entry came from which control. This sits ABOVE the branch
+    // chain on purpose: below the editor branch it would never fire for the
+    // very controls that land last in the snapshot.
+    if (Array.isArray(value) && !(el.type === "checkbox" || persistSelectMultiple(el))) {
+      value = persistGenericValue(value, name, groupSizes)
+      if (value === PERSIST_NO_VALUE) continue
+    }
+    // The mirror, for a draft written BEFORE a group was drafted as a list
+    // (#258): there `features[]` held ONE boolean, and applying it here ticks
+    // every box of the group — precisely the state this fix removes, for as
+    // long as the draft lives (default ttl 7 days). A group key that is not a
+    // list is stale by definition, so the control keeps what the server
+    // rendered and the next snapshot overwrites the key. It reads for a
+    // multi-select too: 0.13.2 wrote last-writer-wins per name, so a checkbox
+    // in a mixed group could leave its boolean under the select's name, and
+    // under `restore: "always"` the select would then deselect everything —
+    // `wanted` being Set{"true"} matches no option. Asking for the `[]` suffix
+    // is what leaves a lone `gift` checkbox on the boolean it has always held —
+    // and scoping the rule to the one key whose meaning changed is why
+    // PERSIST_VERSION stays at 1: bumping it would also throw away the drafted
+    // prose of every form that has no checkbox group at all.
+    if ((el.type === "checkbox" || persistSelectMultiple(el)) && String(name).endsWith("[]") && !Array.isArray(value)) {
+      continue
+    }
     if (kind === "editor") {
       persistApplyEditor(root, el, name, value, always)
     } else if (kind === "contenteditable") {
@@ -1304,6 +1425,12 @@ function persistApply(root, payload, fields) {
     } else if (el.type === "radio") {
       if (!always && controls.some((c) => c.kind === "native" && c.el.type === "radio" && c.name === name && c.el.checked)) continue
       el.checked = el.value === String(value)
+    } else if (el.type === "checkbox" && Array.isArray(value)) {
+      // A drafted group ticks exactly the boxes it held. One box the SERVER
+      // rendered ticked means it had a say, and the draft yields for the whole
+      // group.
+      if (!always && serverTicked.has(name)) continue
+      el.checked = value.map(String).includes(el.value)
     } else if (el.type === "checkbox") {
       if (!always && el.checked) continue
       el.checked = Boolean(value)
@@ -1323,6 +1450,11 @@ function persistApply(root, payload, fields) {
 // editor's sanitizing import (Trix HTMLParser, Lexxy $generateNodesFromDOM +
 // sanitizer). A throw (Lexxy before its editor exists) never escapes connect.
 function persistApplyEditor(root, el, name, value, always) {
+  // A list never reaches here: both callers resolve it through
+  // persistGenericValue first — the group of two or more has no mapping back to
+  // this editor, the group of one does. Belt and braces, because this is the
+  // one apply path with a second entry point.
+  if (Array.isArray(value)) return
   if (!persistEditorReady(el)) return // not upgraded yet — persistDeferEditors re-applies after define
   if (!always && !persistEditorBlank(el)) return
   try {
@@ -1348,10 +1480,12 @@ function persistDeferEditors(root, payload, fields) {
   for (const tag of pending) {
     registry.whenDefined(tag).then(() => {
       if (!root.isConnected) return
-      for (const { el, name, kind } of persistControls(root, payload)) {
+      const deferred = persistControls(root, payload)
+      const sizes = persistGroupSizes(deferred)
+      for (const { el, name, kind } of deferred) {
         if (kind !== "editor" || el.localName !== tag || !Object.hasOwn(fields, name)) continue
-        const value = fields[name]
-        if (value === null || value === undefined) continue
+        const value = persistGenericValue(fields[name], name, sizes)
+        if (value === null || value === undefined || value === PERSIST_NO_VALUE) continue
         persistApplyEditor(root, el, name, value, always)
       }
     })
@@ -3894,6 +4028,7 @@ export default class extends Controller {
     const fields = {}
     const files = []
     const owns = this.#ownershipFilter() // compute ONCE per dispatch (issue #117)
+    const controls = []
     this.element.querySelectorAll("input[name], select[name], textarea[name]").forEach((field) => {
       if (!owns(field)) return
       if (field.type === "file") {
@@ -3901,6 +4036,41 @@ export default class extends Controller {
         // shape (params[name][]) even when the user picked exactly one file —
         // otherwise a [:file] schema would see a lone scalar upload and drop it.
         for (const file of field.files ?? []) files.push({ name: field.name, file, multiple: field.multiple })
+      } else {
+        // Held for a second pass: a hidden input is only a companion if a
+        // checkbox somewhere in the root shares its name, which the first
+        // occurrence cannot know yet.
+        controls.push(field)
+      }
+    })
+    // Collected before the first pass so the editor DOM is walked once.
+    const editors = []
+    this.element.querySelectorAll(`[name]${PERSIST_EDITOR_SELECTOR}`).forEach((el) => {
+      if (owns(el)) editors.push(el) // the SAME hoisted predicate (nested reactive root, issue #15)
+    })
+    const arrayNames = this.#arrayFieldNames(controls)
+    const companionNames = this.#companionNames(controls)
+    for (const field of controls) {
+      if (arrayNames.has(field.name)) {
+        const slot = fields[field.name] ?? (fields[field.name] = [])
+        if (field.type === "checkbox" || field.type === "radio") {
+          // An unchecked box contributes NOTHING, the way a native submission
+          // leaves it out. The group's value is the list of checked values,
+          // and with none checked that list stays an EMPTY ARRAY rather than
+          // vanishing, so over the JSON path the action can tell "the operator
+          // cleared them" from "the group never rendered" and an [:string]
+          // schema coerces [] to []. A form body cannot carry the empty array
+          // at all, and the client switches to one as soon as a file input
+          // holds a file — there the key is simply absent; see the README's
+          // multipart caveat.
+          if (field.checked) slot.push(field.value)
+        } else if (field.type === "hidden") {
+          if (!companionNames.has(field.name)) slot.push(field.value)
+        } else if (field.multiple && field.options) {
+          for (const option of field.options) if (option.selected) slot.push(option.value)
+        } else {
+          slot.push(field.value)
+        }
       } else if (field.type === "checkbox") {
         fields[field.name] = field.checked
       } else if (field.type === "radio") {
@@ -3908,28 +4078,101 @@ export default class extends Controller {
       } else {
         fields[field.name] = field.value
       }
-    })
+    }
     // Named rich-text / custom editors (lexxy-editor, trix-editor) and bare
     // [contenteditable]. These aren't input/select/textarea, so the query above
     // skips them — without this, a reactive save posts an empty value and
     // silently wipes the field (issue #8). Read whatever the element exposes:
     // a custom editor's serialized `.value`, else its contenteditable text.
-    // Only fill a name the standard controls left absent or empty, so a synced
-    // hidden input (e.g. Trix mirrors into one) still wins when populated.
-    this.element
-      .querySelectorAll("[name]:is(lexxy-editor, trix-editor, [contenteditable=''], [contenteditable=true], [contenteditable=plaintext-only])")
+    // Under a plain name: only fill what the standard controls left absent or
+    // empty, so a synced hidden input (e.g. Trix mirrors into one) still wins
+    // when populated. Under a `[]` name the editor APPENDS to the group slot
+    // instead, and a same-named hidden keeps its own say: nothing here can
+    // tell a hidden that mirrors this editor from one that is a list JS
+    // maintains.
+    editors
       .forEach((el) => {
-        if (!owns(el)) return // reuse the SAME hoisted predicate (nested reactive root — issue #15)
         // A plain element (e.g. a <div contenteditable>) has no `name` IDL
         // property — only the attribute — so read getAttribute, not el.name.
         const name = el.getAttribute("name")
         if (!name) return
+        const own = el.value ?? el.textContent ?? el.innerHTML ?? ""
+        // A `[]` name is a group here too: the editor APPENDS its value
+        // instead of replacing the slot. Assigning a scalar posted
+        // `{"notes[]": "<p>x</p>"}` while the draft snapshot pushed the same
+        // control into an array — the wire and the draft disagreeing about one
+        // field, and a declared array type seeing a string. A same-named hidden
+        // is NOT read as this editor's twin: nothing here can tell a mirror
+        // from a list JS maintains, and a value posted twice is visible while a
+        // suppressed one is not.
         const existing = fields[name]
+        // An editor that has not upgraded yet contributes NOTHING to a group.
+        // Trix defines its elements in a setTimeout after load, and its "" is
+        // not an empty value but an absent one: persistSnapshot omits such an
+        // editor for the same reason, so this keeps the wire and the draft
+        // saying the same thing.
+        if (String(name).endsWith("[]") && !collectorEditorReady(el)) return
+        if (String(name).endsWith("[]") && (existing === undefined || Array.isArray(existing))) {
+          const slot = Array.isArray(existing) ? existing : (fields[name] = [])
+          slot.push(own)
+          return
+        }
+        // A scalar already under a `[]` name can only be a RADIO's: a radio
+        // means "pick one" and keeps its single value with or without the
+        // suffix, which is why #arrayFieldNames excepts it. Converting that to
+        // a group here would discard the chosen value — measured, the post lost
+        // it — so the editor stands down and the rule below applies, which
+        // never overwrites a populated name.
+        // Only fill what the standard controls left absent or empty, so a
+        // synced hidden input still wins when populated.
         if (existing == null || existing === "") {
-          fields[name] = el.value ?? el.textContent ?? el.innerHTML ?? ""
+          fields[name] = own
         }
       })
     return { fields, files }
+  }
+
+  // Names collected as an ARRAY rather than a single value: a name carrying the
+  // `[]` suffix, the HTML convention for a group. That suffix is the ONLY
+  // trigger — a group says so, it is not inferred from two controls happening
+  // to share a name. Radios are excluded BY DESIGN: a radio group shares one
+  // name to mean "pick one", and it keeps posting the single checked value,
+  // suffix or not.
+  //
+  // Issue #258: without this, `fields[name] = field.checked` wrote a boolean per
+  // checkbox and same-named boxes overwrote each other, so three boxes with two
+  // ticked left the browser as the LAST box's checked state — the chosen values
+  // never reached the wire, whatever the action's schema declared.
+  #arrayFieldNames(controls) {
+    const names = new Set()
+    for (const field of controls) {
+      // A radio group shares one name BY DESIGN to mean "pick one" and keeps
+      // its single checked value, `[]` suffix or not.
+      if (field.type === "radio") continue
+      if (String(field.name).endsWith("[]")) names.add(field.name)
+    }
+    return names
+  }
+
+  // Names whose group carries a hidden COMPANION: a hidden input is Rails' way
+  // of giving a checkbox a value for the unchecked case, and it is never a
+  // chosen value. Measured from the helpers, the three shapes are:
+  //
+  //   check_box(:u, :sub)
+  //     <input name="u[sub]" type="hidden" value="0"><input type="checkbox" value="1" name="u[sub]">
+  //   check_box(:u, :ids, {multiple: true}, "3")
+  //     <input name="u[ids][]" type="hidden" value="0"><input type="checkbox" value="3" name="u[ids][]">
+  //   collection_check_boxes(...) / an unchecked_value of nil
+  //     <input type="hidden" name="u[ids][]" value="">  — or no hidden at all
+  //
+  // The value differs (unchecked_value, blank, absent), so the value cannot be
+  // the test. What identifies a companion is that a checkbox shares its name.
+  // A hidden WITHOUT a same-named checkbox is a list JS maintains, and its
+  // value is a chosen value like any other.
+  #companionNames(controls) {
+    const names = new Set()
+    for (const field of controls) if (field.type === "checkbox") names.add(field.name)
+    return names
   }
 
   // Re-compute the dirty flag for EVERY field this root owns in one pass (issue
@@ -4760,7 +5003,23 @@ export default class extends Controller {
     fd.append("token", token)
     fd.append("act", action)
     for (const [key, value] of Object.entries(params)) {
-      this.#appendField(fd, this.#wireKey(key), value)
+      // A `[]` name carrying an array is the group shape (issue #258): every
+      // element goes to params[name][], which Rack parses as an array. The
+      // indexed form #appendField writes for a plain array (params[name][0],
+      // params[name][1]) arrives as a hash of index keys — ParamSchema's array
+      // type normalizes that back, but only an array type does, so the two
+      // bodies would stop coercing identically for the same fields.
+      //
+      // An EMPTY group cannot be expressed in a form body at all: a repeated
+      // key with no values is nothing, and `[""]` means something else per
+      // element type. Such a group is therefore ABSENT here while the JSON
+      // path sends `[]` — see the README caveat.
+      if (Array.isArray(value) && String(key).endsWith("[]")) {
+        const wire = `${this.#wireKey(key)}[]`
+        for (const element of value) fd.append(wire, String(element))
+      } else {
+        this.#appendField(fd, this.#wireKey(key), value)
+      }
     }
     const multiNames = this.#multiFileNames(files)
     for (const { name, file, multiple } of files) {

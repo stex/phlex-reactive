@@ -80,6 +80,7 @@ Rails.application.routes.draw do
   get "morph_grid/:id" => "demos#morph_grid"
   get "js_focus/:id" => "demos#js_focus"
   get "partial_grid/:id" => "demos#partial_grid"
+  get "checkbox_group" => "demos#checkbox_group"
   get "document_upload/:id" => "demos#document_upload"
   # Nav probe: where a NON-intercepted form submit would land. Accept POST (and
   # GET) so a native submit produces an observable navigation, not a 404.

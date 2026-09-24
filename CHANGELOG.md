@@ -441,6 +441,85 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A checkbox group collapsed to one boolean, and the chosen values never left
+  the browser (#258).** `#collectFields` wrote `fields[name] = field.checked` for
+  every checkbox, so several boxes sharing a `features[]` name overwrote each
+  other and the action received the LAST box's checked state — `{}` under a
+  `[:string]` schema, `"false"` under a flat `:string` one, silent either way,
+  while a native submission of the same boxes sends
+  `features[]=news&features[]=events`. A name ending in `[]` is now collected as
+  an array of the chosen values: a ticked box contributes its `value`, an
+  unticked one nothing, a `<select multiple>` its selected options. The suffix is
+  the only trigger — a group says so rather than being inferred from two controls
+  sharing a name.
+
+  **That makes the suffix a migration point.** ANY `[]`-named control now
+  contributes to an array, including a single one and including a named rich
+  editor or bare contenteditable, which the collector reads in a second pass: a
+  lone `<input type="text" name="tags[]">` used to post `"abc"` and now posts
+  `["abc"]`. An editor sharing its `[]` name with another control adds its
+  value to the group instead of standing down behind it, so the entry count
+  changes there too. Beside a radio it still stands down, because a radio keeps
+  its single value with or without the suffix. A ready but empty editor
+  contributes an empty string, the way an empty text field in the same group
+  does. An unticked box still contributes nothing. A hidden input under the
+  same name keeps contributing: nothing in the DOM tells a hidden that mirrors
+  an editor from one that is a list JS maintains, and a value posted twice is
+  visible where a swallowed one is not. Against a flat `params: { tags: :string
+  }` the array coerces to the literal `"[\"abc\"]"` — silently, with a 200. A
+  control whose name ends in `[]` has to be declared as an array type (`tags:
+  [:string]`), or renamed without the suffix if it was never meant as a list.
+
+  Three shapes keep their meaning on purpose: a lone checkbox without `[]` stays
+  the documented yes/no boolean, a radio group keeps its single checked value
+  with or without the suffix, and a hidden input sharing a name with a checkbox
+  is that box's companion. The companion is identified by the shared name, not
+  by its value, because Rails renders three of them: `check_box` emits
+  `value="0"`, `check_box(..., multiple: true)` the same under a `[]` name, and
+  `collection_check_boxes` a blank one — or none at all with
+  `unchecked_value: nil`. Reading the second shape by value collected
+  `["0","0","0","3"]` for three boxes with the third ticked.
+
+  A form body cannot carry an empty array. Over the JSON path a cleared group
+  arrives as `[]`; over a form body — which the client uses when a file input
+  carries a file — the group's key is simply absent, and the action's keyword
+  default applies. The two encodings therefore differ for that one case.
+
+  `reactive_persist` drafts such a group as the list of ticked values and
+  restores exactly those boxes; before, the draft held one boolean and the
+  restore ticked every box of the group. Whether the server already rendered a
+  box ticked — in which case it keeps its say and the draft yields — is decided
+  once before the restore walks the controls, because the walk writes `checked`
+  as it goes and asking from inside it would read the restore's own work: the
+  first box it ticks would make every later box of the group look
+  server-rendered, and a draft of two values would come back as one. A
+  non-checkbox control sharing the group's name additionally threw inside the
+  draft write, which is swallowed — the root then persisted nothing at all,
+  silently. On restore, such a control keeps what the server rendered whenever
+  the group has two or more contributors: the list records the values, not
+  which control each one came from, so replaying it would paste `freeform,news`
+  into a text field, an editor, or a contenteditable. A group of ONE
+  contributor has no such ambiguity — its single entry can only have come from
+  that control — so a plain field whose name merely ends in `[]`, the usual
+  shape for a list JS maintains, keeps its draft exactly as it did before
+  groups existed. A `<select multiple>` reads a list by matching option values,
+  which is only sound when the list is its own: sharing a group with another
+  contributor, it too keeps what the server rendered, since a text value that
+  happens to equal an option would otherwise select it.
+
+  Drafts written before this release are not discarded, but their group key is
+  no longer applied to the controls that read a list: it holds one boolean (or,
+  in a mixed group, whichever control wrote last), and applying that kept
+  causing damage for as long as the draft lived — by default seven days after
+  the upgrade. The damage differed by control. A checkbox group came back fully
+  ticked. A `<select multiple>` sharing the group's name lost its rendered
+  selection instead, because under `restore: "always"` the select branch skips
+  the "the server had a say" check and matches `Set{"true"}` against its
+  options, where nothing matches. The next snapshot replaces the key with the
+  list. Only that one key changed meaning, which is why `PERSIST_VERSION` stays
+  where it is: bumping it would also throw away the drafted prose of every form
+  that has no checkbox group at all.
+
 - **`reply.pending` kept its settle handle under
   `enqueue_after_transaction_commit = true` (#254).** The handle was captured in
   `Phlex::Reactive::Settles#serialize`, which reads a thread-local that lives
