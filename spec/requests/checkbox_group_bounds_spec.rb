@@ -9,6 +9,16 @@ require "rails_helper"
 # reach the params at all — the keyword default stands, which is exactly
 # today's behaviour.
 RSpec.describe "The announcement is bounded by the declaration (issue #258)", type: :request do
+  # Restore the lazy default after every example — remove the ivar entirely so
+  # an explicit `= false` from one example never leaks into the next.
+  around do
+    it.run
+  ensure
+    if Phlex::Reactive.instance_variable_defined?(:@verbose_errors)
+      Phlex::Reactive.remove_instance_variable(:@verbose_errors)
+    end
+  end
+
   let(:payload) { { "s" => { "received" => nil } } }
 
   def received(response)

@@ -41,6 +41,7 @@ RSpec.describe "Announced group under reactive_scope (issue #258)", type: :reque
     post_reactive_multipart(ScopedEditorComponent, "save_tags", payload:,
       params: { "todo" => { "title" => "t" } }, empty_groups: ["tags"])
 
+    expect(response).to have_http_status(:ok)
     expect(received_tags(response)).to eq([])
   end
 end

@@ -498,11 +498,11 @@ end
 > client lists its name in a separate field, `empty_groups[]`, and the endpoint
 > sets that param to `[]`. The action gets the same value it would get over JSON.
 >
-> This works for any param the action declares as an array, by its plain name
-> (`features[]`) or with the component's `reactive_scope` in front
-> (`todo[tags][]` under `reactive_scope :todo`). Under a scope you write the name
-> by hand, because `reactive_field(:"tags[]")` gives `todo[tags[]]`, which isn't
-> read as a group:
+> This works for any param the action declares as an array, by its plain name or
+> with the component's `reactive_scope` in front. A `features[]` group is
+> announced as `features`, and a `todo[tags][]` group under `reactive_scope :todo`
+> as `todo[tags]`. Under a scope you write the group's name by hand, because
+> `reactive_field(:"tags[]")` gives `todo[tags[]]`, which isn't read as a group:
 >
 > ```ruby
 > input(type: "checkbox", name: "todo[tags][]", value: "ruby")   # reactive_scope :todo
@@ -3267,7 +3267,8 @@ refresh so a reply that would silently break the next click fails your test.
 **HTTP helpers** — `post_reactive_action(component_or_class, act, params:, payload:)`
 and `post_reactive_multipart(..., empty_groups: [])` POST a signed token to
 `Phlex::Reactive.action_path` exactly as the client does; `empty_groups:` lists
-the groups the client cleared, the way a form body sends them. **Token minting** —
+the groups the client cleared by name, without the `[]`, the way a form body
+sends them. **Token minting** —
 `reactive_token_for(component_or_class, payload = {})`.
 
 > `verbose_errors` defaults ON in test (it changes only an error BODY, never a
