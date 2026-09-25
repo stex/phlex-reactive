@@ -615,7 +615,7 @@ module Phlex
         segments = bracket_path(path)
         if segments.length > 1
           leaf = segments.last
-          return unless schema.key?(leaf.to_sym)
+          return unless declared_key?(schema, leaf)
 
           "schema declares :#{leaf} at top level; nested schemas look like " \
             "{ #{segments.first}: { #{leaf}: :string } }"
@@ -628,12 +628,18 @@ module Phlex
         end
       end
 
+      # A schema declares `name` whether it was written with a symbol or a
+      # string key; ParamSchema.compile keeps whichever the author used.
+      def declared_key?(schema, name)
+        schema.key?(name.to_sym) || schema.key?(name.to_s)
+      end
+
       # The first schema key whose nested hash (or array-of-hash element
       # schema) declares `name` one level down.
       def nested_declaration_of(name, schema)
         schema.find do |_key, type|
           inner = type.is_a?(Array) ? type.first : type
-          inner.is_a?(Hash) && inner.key?(name.to_sym)
+          inner.is_a?(Hash) && declared_key?(inner, name)
         end&.first
       end
 

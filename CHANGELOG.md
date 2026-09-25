@@ -441,6 +441,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The dropped-param hints said nothing for a schema with string keys.**
+  `ParamSchema.compile` keeps keys as the author wrote them, so
+  `params: { "date" => :string }` is valid, but the #16/#21 hints only looked
+  up symbol keys. The param was still dropped and logged, just without the hint
+  that says where the schema declares it.
+
 - **A checkbox group collapsed to one boolean, and the chosen values never left
   the browser (#258).** `#collectFields` wrote `fields[name] = field.checked` for
   every checkbox, so several boxes sharing a `features[]` name overwrote each
